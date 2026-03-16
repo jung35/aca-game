@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Crazy Arcade</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="wrapper">
+      <!-- ── Lobby ─────────────────────────────────── -->
+      <div id="lobby">
+        <div id="lobby-logo">
+          💣 Crazy Arcade
+          <span>WATER BALLOON BATTLE</span>
+        </div>
+
+        <div id="map-grid"></div>
+
+        <button id="play-btn">▶ Play!</button>
+      </div>
+
+      <!-- ── Game ──────────────────────────────────── -->
+      <div id="game-wrap">
+        <div id="game-topbar">
+          <button id="back-btn">◀ Lobby</button>
+          <div id="gtitle">Game</div>
+          <div class="toggle-wrap" id="debug-toggle">
+            <span class="toggle-label">Debug</span>
+            <div class="toggle-pill">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="hud"></div>
+
+        <div id="arena-outer">
+          <div id="arena">
+            <canvas id="bg-canvas" width="572" height="484"></canvas>
+            <canvas id="sprite-canvas" width="572" height="484"></canvas>
+            <canvas id="debug-canvas" width="572" height="484"></canvas>
+          </div>
+        </div>
+
+        <!-- Mobile controls -->
+        <div id="controls">
+          <div class="ctrl-pad">
+            <div></div>
+            <button class="ctrl-btn" id="btn-up">▲</button>
+            <div></div>
+            <button class="ctrl-btn" id="btn-left">◀</button>
+            <button class="ctrl-btn" id="btn-down">▼</button>
+            <button class="ctrl-btn" id="btn-right">▶</button>
+          </div>
+          <button class="ctrl-btn bln-btn" id="btn-bln">💣</button>
+        </div>
+
+        <div id="tip">Arrow Keys / WASD to move • Space to place balloon</div>
+      </div>
+
+      <!-- ── Message overlay ───────────────────────── -->
+      <div id="msg-overlay" class="hidden">
+        <div id="msg-box"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
