@@ -1,7 +1,8 @@
 import type { GameState } from "../types";
 import { CELL_W, CELL_H, COLS, ROWS, ARENA_W, ARENA_H } from "../constants";
 import { cellToPixel } from "../physics/helpers";
-import { shadeColor, powerUpEmoji } from "./utils";
+import { shadeColor } from "./utils";
+import { getPowerUpCanvas } from "./powerupSvg";
 
 // ── 2.5D block helpers ───────────────────────────────────────────────────────
 // Each cell is CELL_W × CELL_H. The "3-D" illusion uses:
@@ -185,26 +186,19 @@ export function drawBackground(
     ctx.restore();
   }
 
-  // Power-ups — glowing item boxes
+  // Power-ups — floating SVG icon, no box
   for (const pu of state.powerUps) {
     const { px, py } = cellToPixel(pu.row, pu.col);
-    // Glowing background
+    const bob = Math.sin(Date.now() * 0.003 + pu.id) * 2.5;
+    const y = py + bob;
+    const oc = getPowerUpCanvas(pu.kind);
+
     ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(px - 12, py - 12, 24, 24, 5);
-    ctx.fillStyle = "rgba(255,214,0,0.85)";
-    ctx.fill();
-    ctx.strokeStyle = "#ff9800";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    // Shine
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
-    ctx.fillRect(px - 10, py - 10, 20, 6);
+    ctx.shadowColor = "rgba(0,0,0,0.5)";
+    ctx.shadowBlur = 5;
+    ctx.shadowOffsetY = 2;
+    // Draw centred: icon is 20×20 logical px
+    ctx.drawImage(oc, px - 10, y - 10, 20, 20);
     ctx.restore();
-    // Emoji
-    ctx.font = "16px serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(powerUpEmoji(pu.kind), px, py + 1);
   }
 }

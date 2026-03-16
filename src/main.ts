@@ -49,7 +49,6 @@ const netLatency = document.getElementById("net-latency") as HTMLElement;
 // Buttons
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const backBtn = document.getElementById("back-btn") as HTMLButtonElement;
-const p2pStartGameBtn = document.getElementById("p2p-start-game-btn") as HTMLButtonElement;
 const debugToggle = document.getElementById("debug-toggle") as HTMLElement;
 
 // Room panel (always-on inline room UI)
@@ -96,7 +95,7 @@ interface CharConfig {
 let localCharConfig: CharConfig = {
   outfit: OUTFIT_STYLES[0].key,
   skinTone: SKIN_TONES[0],
-  team: 0,
+  team: 1,
 };
 
 function loadCharConfig(): void {
@@ -314,28 +313,43 @@ function buildMapGrid(): void {
 
 function startGame(numOnlinePlayers = 1): void {
   const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-  const numAI = isOnline ? aiSlots.size : 7; // solo: 7 AI; online: only host-added AI slots
+  const numAI = isOnline ? aiSlots.size : Math.max(aiSlots.size, 1); // solo: at least 1 AI; online: host-added AI only
   const numHumans = isOnline ? numOnlinePlayers : 1;
+
+  // Sorted AI slot indices so we can map grid-slot→team in a stable order
+  const sortedAISlots = [...aiSlots].sort((a, b) => a - b);
+  // If solo with no AI added yet, synthesise one extra slot (team 2 as complement to host team 1)
+  const soloFallbackTeam = (slotTeams.get(0) ?? 1) % TEAM_COLORS.length + 1;
 
   // Build player configs — merge local config, guest configs, and host-assigned teams
   const playerConfigs: PlayerConfig[] = [];
   for (let i = 0; i < numHumans + numAI; i++) {
-    const assignedTeam = slotTeams.get(i) ?? 0;
     if (i === localPlayerIndex) {
       playerConfigs[i] = {
         outfit: localCharConfig.outfit,
         skinTone: localCharConfig.skinTone,
-        team: assignedTeam,
+        team: slotTeams.get(i) ?? 1,
         name: getPlayerName(),
       };
-    } else {
+    } else if (i < numHumans) {
+      // Other human players (online guests)
       const gc = guestConfigs.get(i);
-      const guestName = connectedPlayers.get(i) ?? `P${i + 1}`;
       playerConfigs[i] = {
         outfit: gc?.outfit,
         skinTone: gc?.skinTone,
-        team: assignedTeam,
-        name: guestName,
+        team: slotTeams.get(i) ?? 1,
+        name: connectedPlayers.get(i) ?? `P${i + 1}`,
+      };
+    } else {
+      // AI players: map the (i - numHumans)-th AI to its grid slot index
+      const aiIndex = i - numHumans;
+      const gridSlot = sortedAISlots[aiIndex]; // undefined when solo fallback
+      const team = gridSlot !== undefined
+        ? (slotTeams.get(gridSlot) ?? soloFallbackTeam)
+        : soloFallbackTeam;
+      playerConfigs[i] = {
+        team,
+        name: gridSlot !== undefined ? `CPU ${gridSlot}` : "CPU",
       };
     }
   }
@@ -371,7 +385,6 @@ function endGame(): void {
   aiSlots.clear();
   slotTeams.clear();
   guestConfigs.clear();
-  p2pStartGameBtn.disabled = true;
   msgOverlay.classList.add("hidden");
   gameWrap.classList.add("hidden");
   lobby.classList.remove("hidden");
@@ -537,6 +550,7 @@ function buildStateSnapshot(state: GameState): StateSyncPayload {
       col: u.col,
       kind: u.kind,
     })),
+    blockPowerUps: [...state.blockPowerUps.entries()],
     grid: state.grid,
     gameOver: state.gameOver,
     winner: state.winner,
@@ -580,6 +594,11 @@ function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
   }));
   if (payload.grid)
     state.grid = payload.grid as import("./game/types").TileType[][];
+  if (payload.blockPowerUps) {
+    state.blockPowerUps = new Map(
+      payload.blockPowerUps.map(([k, v]) => [k, v as import("./game/types").PowerUpKind | null])
+    );
+  }
   state.gameOver = payload.gameOver;
   state.winner = payload.winner;
   state.winnerTeam = payload.winnerTeam ?? null;
@@ -652,7 +671,49 @@ const slotTeams = new Map<number, number>();
 /** Guest character configs received via "hello": playerIndex → config */
 const guestConfigs = new Map<number, { outfit: string; skinTone: string }>();
 
-/** Update the char-picker card background to reflect the local player's team. */
+/** Refresh the single Start button label + enabled state. */
+function refreshStartBtn(): void {
+  if (isOnline && peer?.role === "host") {
+    // Online host: need at least one guest or one AI slot
+    const hasPlayers = connectedPlayers.size > 0 || aiSlots.size > 0;
+    playBtn.disabled = !hasPlayers;
+    playBtn.textContent = "▶ Start Online";
+  } else if (isOnline && peer?.role === "guest") {
+    // Guest: cannot start
+    playBtn.disabled = true;
+    playBtn.textContent = "⏳ Waiting for host…";
+  } else {
+    // Solo: always ready — describe the team layout
+    playBtn.disabled = false;
+    playBtn.textContent = `▶ ${getSoloModeLabel()}`;
+  }
+}
+
+/** Build a label like "1v1", "2v2", "1v3", "1v1v1v1" describing the match layout. */
+function getSoloModeLabel(): string {
+  // Slot 0 = human, sorted AI slots = opponents
+  const sortedAISlots = [...aiSlots].sort((a, b) => a - b);
+  const soloFallbackTeam = (slotTeams.get(0) ?? 1) % TEAM_COLORS.length + 1;
+
+  // Build a map of team → player count
+  const teamCounts = new Map<number, number>();
+  // Human (slot 0)
+  const humanTeam = slotTeams.get(0) ?? 1;
+  teamCounts.set(humanTeam, (teamCounts.get(humanTeam) ?? 0) + 1);
+  // AI slots (or 1 fallback)
+  const aiCount = Math.max(aiSlots.size, 1);
+  for (let a = 0; a < aiCount; a++) {
+    const gridSlot = sortedAISlots[a];
+    const team = gridSlot !== undefined
+      ? (slotTeams.get(gridSlot) ?? soloFallbackTeam)
+      : soloFallbackTeam;
+    teamCounts.set(team, (teamCounts.get(team) ?? 0) + 1);
+  }
+
+  // Sort teams so biggest group is first, then join with "v"
+  const groups = [...teamCounts.values()].sort((a, b) => b - a);
+  return groups.join("v");
+}
 function updateCharPickerTeamBg(): void {
   const charPicker = document.getElementById("char-picker");
   if (!charPicker) return;
@@ -740,11 +801,11 @@ function buildSlotsGrid(): void {
     if (isHost && slotKind === "empty") {
       slot.title = "Click to add AI";
       slot.style.cursor = "pointer";
-      slot.addEventListener("click", () => { aiSlots.add(i); buildSlotsGrid(); broadcastLobbyState(); });
+      slot.addEventListener("click", () => { aiSlots.add(i); buildSlotsGrid(); broadcastLobbyState(); refreshStartBtn(); });
     } else if (isHost && slotKind === "ai") {
       slot.title = "Click to remove AI";
       slot.style.cursor = "pointer";
-      slot.addEventListener("click", () => { aiSlots.delete(i); buildSlotsGrid(); broadcastLobbyState(); });
+      slot.addEventListener("click", () => { aiSlots.delete(i); buildSlotsGrid(); broadcastLobbyState(); refreshStartBtn(); });
     }
 
     // Host: right-click any non-empty slot → cycle team
@@ -752,8 +813,9 @@ function buildSlotsGrid(): void {
       slot.title = (slot.title ? slot.title + " · " : "") + "Right-click to change team";
       slot.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        const cur = slotTeams.get(i) ?? 0;
-        slotTeams.set(i, (cur + 1) % (TEAM_COLORS.length + 1));
+        const cur = slotTeams.get(i) ?? 1;
+        // Cycle 1→2→3→4→1 (team 0 = no team is not allowed)
+        slotTeams.set(i, (cur % TEAM_COLORS.length) + 1);
         // Update local player's team if host right-clicks their own slot
         if (i === 0) {
           localCharConfig.team = slotTeams.get(0) ?? 0;
@@ -762,6 +824,7 @@ function buildSlotsGrid(): void {
         }
         buildSlotsGrid();
         broadcastLobbyState();
+        refreshStartBtn();
       });
     }
 
@@ -805,7 +868,7 @@ function kickPlayer(playerIndex: number): void {
   // Re-number remaining guests so the slot stays occupied
   buildSlotsGrid();
   broadcastLobbyState();
-  if (connectedPlayers.size === 0) p2pStartGameBtn.disabled = true;
+  refreshStartBtn();
 }
 
 async function initHostRoom(): Promise<void> {
@@ -818,34 +881,72 @@ async function initHostRoom(): Promise<void> {
   connectedPlayers.clear();
   aiSlots.clear();
   slotTeams.clear();
+  // Assign only the host's default team; empty slots get no team
+  slotTeams.set(0, 1);
   guestConfigs.clear();
   setRoomStatus("Creating room…");
 
   peer = new RoomPeer({
     onGuestJoined(count, playerIndex) {
       setRoomStatus(`${count} guest${count !== 1 ? "s" : ""} connected — share the code!`, "ok");
-      p2pStartGameBtn.disabled = false;
       isOnline = true;
       // Name will arrive via "hello"; placeholder until then
       if (!connectedPlayers.has(playerIndex)) connectedPlayers.set(playerIndex, `P${playerIndex + 1}`);
+      // Assign a default team for this new guest slot if not already set
+      if (!slotTeams.has(playerIndex)) slotTeams.set(playerIndex, (playerIndex % TEAM_COLORS.length) + 1);
       buildSlotsGrid();
       broadcastLobbyState();
+      refreshStartBtn();
     },
     onConnectedToHost() { /* host doesn't use this */ },
-    onDisconnected() {
+    onDisconnected(playerIndex?: number) {
       setNetStatus("disconnected");
       // Sync connected players from the authoritative peer connection map
       const active = peer?.activePlayerIndices ?? new Set<number>();
       for (const idx of [...connectedPlayers.keys()]) {
         if (!active.has(idx)) connectedPlayers.delete(idx);
       }
+
+      // Mid-game: kill the disconnected player and check for game over
+      if (gameState && playerIndex !== undefined) {
+        remoteDir.delete(playerIndex); // stop applying stale inputs
+        const p = gameState.players[playerIndex];
+        if (p && p.alive) {
+          p.alive = false;
+          // Check if the game should end
+          const stillAlive = gameState.players.filter(q => q.alive && !q.trappedInBalloon);
+          const teamsInPlay = gameState.players.some(q => q.team > 0);
+          if (teamsInPlay) {
+            const teamsLeft = new Set(stillAlive.map(q => q.team));
+            if (teamsLeft.size <= 1) {
+              gameState.gameOver = true;
+              gameState.running = false;
+              gameState.winnerTeam = stillAlive[0]?.team ?? null;
+              gameState.winner = null;
+            }
+          } else {
+            if (stillAlive.length <= 1) {
+              gameState.gameOver = true;
+              gameState.running = false;
+              gameState.winner = stillAlive[0]?.id ?? null;
+              gameState.winnerTeam = null;
+            }
+          }
+        }
+      }
+
+      // If not mid-game, clear the team assignment so the slot goes back to empty
+      if (!gameState && playerIndex !== undefined) {
+        slotTeams.delete(playerIndex);
+      }
+
       const count = connectedPlayers.size;
       setRoomStatus(count > 0
         ? `${count} guest${count !== 1 ? "s" : ""} connected — share the code!`
         : "A guest disconnected.", count > 0 ? "ok" : "err");
       buildSlotsGrid();
       broadcastLobbyState();
-      if (connectedPlayers.size === 0) p2pStartGameBtn.disabled = true;
+      refreshStartBtn();
     },
     onMessage(msg) {
       if (msg.type === "hello") {
@@ -869,6 +970,7 @@ async function initHostRoom(): Promise<void> {
     const code = await peer.createRoom();
     lobbyRoomCode.textContent = code;
     setRoomStatus("Share this code with friends — up to 7 can join.");
+    refreshStartBtn();
   } catch (err) {
     lobbyRoomCode.textContent = "ERR";
     setRoomStatus(String(err instanceof Error ? err.message : err), "err");
@@ -889,31 +991,32 @@ roomCopyBtn.addEventListener("click", () => {
 
 // Refresh = create a new room
 roomRefreshBtn.addEventListener("click", () => {
-  p2pStartGameBtn.disabled = true;
   connectedPlayers.clear();
   buildSlotsGrid();
   initHostRoom();
 });
 
-// Start Online game (host only)
-p2pStartGameBtn.addEventListener("click", () => {
-  if (!peer || peer.role !== "host") return;
-  const total = peer.guestCount + 1;
-  const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-
-  // Build configs first so we can broadcast them to guests before starting
-  const numAI = aiSlots.size;
-  const serializedConfigs = Array.from({ length: total + numAI }, (_, i) => {
-    const team = slotTeams.get(i) ?? 0;
-    if (i === 0) {
-      return { name: getPlayerName(), outfit: localCharConfig.outfit, skinTone: localCharConfig.skinTone, team };
-    }
-    const gc = guestConfigs.get(i);
-    return { name: connectedPlayers.get(i) ?? `P${i + 1}`, outfit: gc?.outfit ?? "", skinTone: gc?.skinTone ?? "", team };
-  });
-
-  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0, playerCount: total, playerConfigs: serializedConfigs });
-  startGame(total);
+// Single unified Start button — solo or online depending on state
+playBtn.addEventListener("click", () => {
+  if (isOnline && peer?.role === "host") {
+    // Online host start
+    const total = peer.guestCount + 1;
+    const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
+    const numAI = aiSlots.size;
+    const serializedConfigs = Array.from({ length: total + numAI }, (_, i) => {
+      const team = slotTeams.get(i) ?? 1;
+      if (i === 0) {
+        return { name: getPlayerName(), outfit: localCharConfig.outfit, skinTone: localCharConfig.skinTone, team };
+      }
+      const gc = guestConfigs.get(i);
+      return { name: connectedPlayers.get(i) ?? `P${i + 1}`, outfit: gc?.outfit ?? "", skinTone: gc?.skinTone ?? "", team };
+    });
+    peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0, playerCount: total, playerConfigs: serializedConfigs });
+    startGame(total);
+  } else if (!isOnline) {
+    // Solo vs AI
+    startGame(1);
+  }
 });
 
 // ─── Join a Room ──────────────────────────────────────────────────────────────
@@ -942,7 +1045,7 @@ async function joinAsGuest(): Promise<void> {
       setNetStatus("connected");
       lobbyRoomCode.textContent = code;
       setRoomStatus(`Joined room ${code} as P${playerIndex + 1}`, "ok");
-      p2pStartGameBtn.disabled = true; // only host can start
+      refreshStartBtn(); // guest: button disabled with "waiting for host"
 
       // Introduce ourselves to the host
       peer?.sendToHost({
@@ -956,9 +1059,7 @@ async function joinAsGuest(): Promise<void> {
       // Lock map selection — guest cannot change map
       setMapGridLocked(true);
     },
-    onDisconnected() {
-      setNetStatus("disconnected");
-      setJoinMsg("Disconnected from host.", "err");
+    onDisconnected(_playerIndex?: number) {
       roomJoinBtn.disabled = false;
       setMapGridLocked(false);
       connectedPlayers.clear();
@@ -1055,12 +1156,6 @@ async function joinAsGuest(): Promise<void> {
 
 // ─── Lobby / Navigation ───────────────────────────────────────────────────────
 
-playBtn.addEventListener("click", () => {
-  isOnline = false;
-  localPlayerIndex = 0;
-  startGame(1);
-});
-
 backBtn.addEventListener("click", endGame);
 
 // ─── Debug Toggle ──────────────────────────────────────────────────────────────
@@ -1148,4 +1243,5 @@ buildMapGrid();
 loadCharConfig();
 buildCharPicker();
 buildSlotsGrid();
+refreshStartBtn();
 initHostRoom();

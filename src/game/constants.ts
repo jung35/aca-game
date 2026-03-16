@@ -9,7 +9,7 @@ export const CELL_H = ARENA_H / ROWS; // 30 px
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
 
-export const BALLOON_FUSE = 3.0; // seconds until explosion
+export const BALLOON_FUSE = 4.0; // seconds until explosion
 export const EXPLOSION_LINGER = 0.5; // seconds splash stays
 export const TRAP_FUSE = 3.0; // extra seconds when trapped
 export const TRAP_PLAYER_FUSE = 3.0; // seconds a player is trapped in a balloon before dying
@@ -21,9 +21,6 @@ export const DEFAULT_RANGE = 2;
 export const DEFAULT_MAX_BALLOONS = 1;
 export const DEFAULT_SPEED = 4.5; // cells per second (multiplied by CELL_W/H in physics)
 export const PLAYER_HALF = 7; // collision half-size in pixels — matches the ~14px wide sprite
-
-export const POWERUP_SPAWN_CHANCE = 0.45; // chance a destroyed block drops a powerup
-export const POWERUP_KINDS = ["range", "extra", "speed", "kick"] as const;
 
 // ─── AI ───────────────────────────────────────────────────────────────────────
 

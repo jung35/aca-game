@@ -10,6 +10,7 @@ import {
   SKIN_TONES,
   OUTFIT_STYLES,
 } from "./constants";
+import { POWERUP_CONFIG, pickPowerUpKind } from "./powerupConfig";
 
 let _balloonId = 0;
 let _powerUpId = 0;
@@ -100,6 +101,17 @@ export function createGameState(
     players.push(createPlayer(i, true, playerConfigs[i] ?? {}, row, col));
   }
 
+  // Pre-determine powerup drops for every destructible block
+  const blockPowerUps = new Map<string, import("./types").PowerUpKind | null>();
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] === 2) {
+        const drops = Math.random() < POWERUP_CONFIG.dropChance;
+        blockPowerUps.set(`${r},${c}`, drops ? pickPowerUpKind(Math.random) : null);
+      }
+    }
+  }
+
   return {
     map,
     grid,
@@ -107,6 +119,7 @@ export function createGameState(
     balloons: [],
     explosions: [],
     powerUps: [],
+    blockPowerUps,
     running: true,
     paused: false,
     gameOver: false,

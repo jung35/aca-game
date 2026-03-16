@@ -357,6 +357,24 @@ body {
   letter-spacing: 1px;
 }
 
+/* ── Slots hint ─────────────────────────────────────────────────────────────── */
+#slots-hint {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  flex-wrap: wrap;
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.38);
+  letter-spacing: 0.5px;
+  margin-top: -2px;
+}
+#slots-hint span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* ── Net status bar ─────────────────────────────────────────────────────────── */
 #net-status-bar {
   display: flex;
@@ -474,6 +492,13 @@ body {
   box-shadow:
     0 2px 0 #bf360c,
     0 3px 12px rgba(255, 109, 0, 0.4);
+}
+#play-btn:disabled {
+  background: linear-gradient(135deg, #555 0%, #333 100%);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
 }
 
 /* ── Lobby Actions Row ──────────────────────────────────────────────────────── */

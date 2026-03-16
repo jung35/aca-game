@@ -6,18 +6,3 @@ export function shadeColor(hex: string, pct: number): string {
   const b = Math.min(255, Math.max(0, (num & 0xff) + pct));
   return `rgb(${r},${g},${b})`;
 }
-
-export function powerUpEmoji(kind: string): string {
-  switch (kind) {
-    case "range":
-      return "🔥";
-    case "extra":
-      return "🎈";
-    case "speed":
-      return "⚡";
-    case "kick":
-      return "👟";
-    default:
-      return "⭐";
-  }
-}

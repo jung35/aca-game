@@ -62,6 +62,8 @@ export interface StateSyncPayload {
   }>;
   explosions: Array<{ row: number; col: number; timer: number }>;
   powerUps: Array<{ id: number; row: number; col: number; kind: string }>;
+  /** Serialised blockPowerUps: [key, kind|null][] */
+  blockPowerUps: Array<[string, string | null]>;
   grid: number[][];
   gameOver: boolean;
   winner: number | null;
@@ -74,7 +76,7 @@ export interface NetCallbacks {
   onGuestJoined: (guestCount: number, playerIndex: number) => void;
   /** Guest: called once the host sends the slot-assignment handshake. */
   onConnectedToHost: (playerIndex: number) => void;
-  onDisconnected: () => void;
+  onDisconnected: (playerIndex?: number) => void;
   onMessage: (msg: NetMessage, fromId?: string) => void;
   onStatusChange: (s: NetStatus) => void;
   onError: (msg: string) => void;

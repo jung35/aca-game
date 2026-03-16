@@ -122,6 +122,8 @@ export interface GameState {
   balloons: Balloon[];
   explosions: ExplosionCell[];
   powerUps: PowerUp[];
+  /** Pre-determined powerup drops keyed by "row,col". null = no drop. */
+  blockPowerUps: Map<string, PowerUpKind | null>;
   running: boolean;
   paused: boolean;
   gameOver: boolean;

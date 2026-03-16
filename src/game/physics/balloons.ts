@@ -6,8 +6,6 @@ import {
   EXPLOSION_LINGER,
   TRAP_FUSE,
   TRAP_PLAYER_FUSE,
-  POWERUP_SPAWN_CHANCE,
-  POWERUP_KINDS,
 } from "../constants";
 import { nextBalloonId, nextPowerUpId } from "../gameState";
 
@@ -59,9 +57,10 @@ export function explodeBalloon(state: GameState, balloon: Balloon): void {
       affectedCells.push({ row: nr, col: nc });
       if (state.grid[nr][nc] === 2) {
         state.grid[nr][nc] = 0;
-        if (Math.random() < POWERUP_SPAWN_CHANCE) {
-          const kind =
-            POWERUP_KINDS[Math.floor(Math.random() * POWERUP_KINDS.length)];
+        const key = `${nr},${nc}`;
+        const kind = state.blockPowerUps.get(key);
+        state.blockPowerUps.delete(key);
+        if (kind != null) {
           state.powerUps.push({
             id: nextPowerUpId(state),
             row: nr,

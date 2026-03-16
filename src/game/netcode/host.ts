@@ -66,21 +66,23 @@ export function createRoom(ctx: HostContext): {
     });
 
     conn.on("close", () => {
-      // Remove from playerIndexToConn
+      // Capture player index BEFORE removing from map
+      let disconnectedIndex: number | undefined;
       for (const [idx, pid] of ctx.playerIndexToConn) {
-        if (pid === conn.peer) { ctx.playerIndexToConn.delete(idx); break; }
+        if (pid === conn.peer) { disconnectedIndex = idx; ctx.playerIndexToConn.delete(idx); break; }
       }
       ctx.connections.delete(conn.peer);
       if (ctx.connections.size === 0) ctx.setStatus("connecting");
-      ctx.callbacks.onDisconnected();
+      ctx.callbacks.onDisconnected(disconnectedIndex);
     });
 
     conn.on("error", () => {
+      let disconnectedIndex: number | undefined;
       for (const [idx, pid] of ctx.playerIndexToConn) {
-        if (pid === conn.peer) { ctx.playerIndexToConn.delete(idx); break; }
+        if (pid === conn.peer) { disconnectedIndex = idx; ctx.playerIndexToConn.delete(idx); break; }
       }
       ctx.connections.delete(conn.peer);
-      ctx.callbacks.onDisconnected();
+      ctx.callbacks.onDisconnected(disconnectedIndex);
     });
   });
 
