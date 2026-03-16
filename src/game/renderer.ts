@@ -22,8 +22,8 @@ export function initRenderer(
 
   const dpr = window.devicePixelRatio || 1;
   [bgCanvas, spriteCanvas, debugCanvas].forEach((c) => {
-    c.width = 572 * dpr;
-    c.height = 484 * dpr;
+    c.width = 630 * dpr;
+    c.height = 510 * dpr;
     (c.getContext("2d") as CanvasRenderingContext2D).scale(dpr, dpr);
   });
 
@@ -37,7 +37,7 @@ export function initRenderer(
 export function drawBackground(state: GameState): void {
   const ctx = bgCtx;
   const { map, grid } = state;
-  ctx.clearRect(0, 0, 572, 484);
+  ctx.clearRect(0, 0, 630, 510);
 
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
@@ -111,7 +111,7 @@ export function drawBackground(state: GameState): void {
 
 export function drawSprites(state: GameState, now: number): void {
   const ctx = spriteCtx;
-  ctx.clearRect(0, 0, 572, 484);
+  ctx.clearRect(0, 0, 630, 510);
 
   // Draw balloons
   for (const b of state.balloons) {
@@ -215,20 +215,20 @@ export function drawSprites(state: GameState, now: number): void {
 
 export function drawDebug(state: GameState): void {
   const ctx = debugCtx;
-  ctx.clearRect(0, 0, 572, 484);
+  ctx.clearRect(0, 0, 630, 510);
 
   ctx.strokeStyle = "rgba(255,255,0,0.3)";
   ctx.lineWidth = 0.5;
   for (let r = 0; r <= ROWS; r++) {
     ctx.beginPath();
     ctx.moveTo(0, r * CELL_H);
-    ctx.lineTo(572, r * CELL_H);
+    ctx.lineTo(630, r * CELL_H);
     ctx.stroke();
   }
   for (let c = 0; c <= COLS; c++) {
     ctx.beginPath();
     ctx.moveTo(c * CELL_W, 0);
-    ctx.lineTo(c * CELL_W, 484);
+    ctx.lineTo(c * CELL_W, 510);
     ctx.stroke();
   }
 

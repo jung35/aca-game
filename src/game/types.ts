@@ -34,14 +34,17 @@ export interface Player {
   id: number;
   row: number;
   col: number;
-  /** pixel position (interpolated) */
+  /** pixel position (centre of player) */
   px: number;
   py: number;
+  /** pixel velocity */
+  vx: number;
+  vy: number;
   color: string;
   hat: string;
   maxBalloons: number;
   balloonRange: number;
-  speed: number; // cells per second
+  speed: number; // pixels per second
   alive: boolean;
   isAI: boolean;
   score: number;
@@ -49,11 +52,8 @@ export interface Player {
   balloonCount: number;
   invincible: boolean;
   invincibleTimer: number;
-  moving: boolean;
+  /** facing direction for rendering */
   moveDir: Direction | null;
-  moveProgress: number; // 0..1
-  fromRow: number;
-  fromCol: number;
 }
 
 // ─── Balloon ──────────────────────────────────────────────────────────────────
@@ -89,6 +89,11 @@ export interface PowerUp {
   kind: PowerUpKind;
   el: HTMLElement | null;
 }
+
+// ─── Network ──────────────────────────────────────────────────────────────────
+
+/** Which player slot the local human controls (0 = P1 host, 1 = P2 guest). */
+export type LocalPlayerIndex = 0 | 1;
 
 // ─── Game State ───────────────────────────────────────────────────────────────
 

@@ -1,0 +1,11 @@
+services:
+  dev:
+    volumes:
+      # Mount the project root to /app — must match workspaceFolder in devcontainer.json
+      - ..:/app:cached
+      # Preserve container-native node_modules (Linux binaries differ from Windows)
+      - /app/node_modules
+
+    # Override the Vite CMD so VS Code can attach first; the dev server is
+    # started via postStartCommand in devcontainer.json instead.
+    command: sleep infinity

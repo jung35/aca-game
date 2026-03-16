@@ -1,31 +1,67 @@
-import type { GameState } from "./game/types";
-import type { Direction } from "./game/types";
+﻿/**
+ * main.ts – Entry point for Crazy Arcade.
+ *
+ * Handles:
+ *  - DOM wiring (lobby, P2P panel, game view)
+ *  - Map selection + game start
+ *  - Keyboard / touch input
+ *  - Main game loop (host-authoritative for online, solo for offline)
+ *  - PeerJS room-code multiplayer via RoomPeer
+ */
+
+import "./style.css";
 import { MAPS } from "./game/maps";
 import { createGameState } from "./game/gameState";
-import { updateGame, placeBalloon, startMove } from "./game/physics";
 import {
   initRenderer,
   drawBackground,
   drawSprites,
   drawDebug,
-  drawMapPreview,
 } from "./game/renderer";
+import { updateGame, setPlayerVelocity, placeBalloon } from "./game/physics";
 import { initAI, updateAI } from "./game/ai";
+import type { GameState, Direction } from "./game/types";
+import { RoomPeer } from "./game/netcode";
+import type { NetMessage, StateSyncPayload } from "./game/netcode";
 
-// ─── DOM References ───────────────────────────────────────────────────────────
+// ─── DOM References ────────────────────────────────────────────────────────────
 
-const lobby = document.getElementById("lobby")!;
-const gameWrap = document.getElementById("game-wrap")!;
-const mapGrid = document.getElementById("map-grid")!;
-const playBtn = document.getElementById("play-btn")!;
-const backBtn = document.getElementById("back-btn")!;
-const gtitle = document.getElementById("gtitle")!;
-const hud = document.getElementById("hud")!;
-const msgOverlay = document.getElementById("msg-overlay")!;
-const msgBox = document.getElementById("msg-box")!;
-const tipEl = document.getElementById("tip")!;
-const debugToggle = document.getElementById("debug-toggle")!;
+const lobby = document.getElementById("lobby") as HTMLElement;
+const gameWrap = document.getElementById("game-wrap") as HTMLElement;
+const p2pPanel = document.getElementById("p2p-panel") as HTMLElement;
+const mapGrid = document.getElementById("map-grid") as HTMLElement;
+const hudEl = document.getElementById("hud") as HTMLElement;
+const msgOverlay = document.getElementById("msg-overlay") as HTMLElement;
+const msgBox = document.getElementById("msg-box") as HTMLElement;
+const netStatus = document.getElementById("net-status") as HTMLElement;
+const netLatency = document.getElementById("net-latency") as HTMLElement;
 
+// Buttons
+const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
+const openP2pBtn = document.getElementById("open-p2p-btn") as HTMLButtonElement;
+const backBtn = document.getElementById("back-btn") as HTMLButtonElement;
+const p2pCloseBtn = document.getElementById("p2p-close") as HTMLButtonElement;
+const p2pHostBtn = document.getElementById("p2p-host-btn") as HTMLButtonElement;
+const p2pGuestBtn = document.getElementById(
+  "p2p-guest-btn",
+) as HTMLButtonElement;
+const p2pStartGameBtn = document.getElementById(
+  "p2p-start-game-btn",
+) as HTMLButtonElement;
+const p2pJoinBtn = document.getElementById("p2p-join-btn") as HTMLButtonElement;
+const debugToggle = document.getElementById("debug-toggle") as HTMLElement;
+
+// P2P panel sub-sections
+const p2pHostStep = document.getElementById("p2p-host-step") as HTMLElement;
+const p2pGuestStep = document.getElementById("p2p-guest-step") as HTMLElement;
+const p2pRoomCode = document.getElementById("p2p-room-code") as HTMLElement;
+const p2pGuestCount = document.getElementById("p2p-guest-count") as HTMLElement;
+const p2pJoinInput = document.getElementById(
+  "p2p-join-input",
+) as HTMLInputElement;
+const p2pMsg = document.getElementById("p2p-msg") as HTMLElement;
+
+// Canvases
 const bgCanvas = document.getElementById("bg-canvas") as HTMLCanvasElement;
 const spriteCanvas = document.getElementById(
   "sprite-canvas",
@@ -34,240 +70,571 @@ const debugCanvas = document.getElementById(
   "debug-canvas",
 ) as HTMLCanvasElement;
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// Mobile controls
+const btnUp = document.getElementById("btn-up") as HTMLButtonElement;
+const btnDown = document.getElementById("btn-down") as HTMLButtonElement;
+const btnLeft = document.getElementById("btn-left") as HTMLButtonElement;
+const btnRight = document.getElementById("btn-right") as HTMLButtonElement;
+const btnBln = document.getElementById("btn-bln") as HTMLButtonElement;
 
+// ─── State ─────────────────────────────────────────────────────────────────────
+
+let gameState: GameState | null = null;
 let selectedMapId = MAPS[0].id;
-let state: GameState | null = null;
+let peer: RoomPeer | null = null;
+let localPlayerIndex = 0; // 0 = host/solo, 1-7 = guest
+let isOnline = false;
 let rafId = 0;
 let lastTime = 0;
-let showDebug = false;
-const keysHeld = new Set<string>();
 
-// ─── Lobby ────────────────────────────────────────────────────────────────────
+/** Input queue for guest messages received by the host. */
+const remoteInputQueue: NetMessage[] = [];
 
-function buildLobby(): void {
+// ─── Keyboard Input ────────────────────────────────────────────────────────────
+
+const keysDown = new Set<string>();
+
+document.addEventListener("keydown", (e) => {
+  keysDown.add(e.code);
+  if (e.code === "Space" || e.code === "KeyX") handleBalloon(0);
+  if (e.code === "KeyM") handleBalloon(localPlayerIndex);
+});
+
+document.addEventListener("keyup", (e) => {
+  keysDown.delete(e.code);
+});
+
+function getDirForPlayer(idx: number): Direction | null {
+  if (idx === 0) {
+    if (keysDown.has("ArrowUp") || keysDown.has("KeyW")) return "up";
+    if (keysDown.has("ArrowDown") || keysDown.has("KeyS")) return "down";
+    if (keysDown.has("ArrowLeft") || keysDown.has("KeyA")) return "left";
+    if (keysDown.has("ArrowRight") || keysDown.has("KeyD")) return "right";
+  } else {
+    if (keysDown.has("KeyI")) return "up";
+    if (keysDown.has("KeyK")) return "down";
+    if (keysDown.has("KeyJ")) return "left";
+    if (keysDown.has("KeyL")) return "right";
+  }
+  return null;
+}
+
+function handleBalloon(playerIdx: number): void {
+  if (
+    !gameState ||
+    !gameState.running ||
+    gameState.paused ||
+    gameState.gameOver
+  )
+    return;
+  const player = gameState.players[playerIdx];
+  if (!player || !player.alive) return;
+
+  if (isOnline && peer?.role === "guest" && playerIdx === localPlayerIndex) {
+    peer.sendToHost({
+      type: "input",
+      playerId: localPlayerIndex,
+      action: "balloon",
+    });
+    return;
+  }
+  placeBalloon(gameState, player);
+}
+
+// ─── Mobile controls ───────────────────────────────────────────────────────────
+
+function setupMobileBtn(el: HTMLButtonElement, code: string) {
+  el.addEventListener("pointerdown", () => keysDown.add(code));
+  el.addEventListener("pointerup", () => keysDown.delete(code));
+  el.addEventListener("pointerleave", () => keysDown.delete(code));
+}
+setupMobileBtn(btnUp, "ArrowUp");
+setupMobileBtn(btnDown, "ArrowDown");
+setupMobileBtn(btnLeft, "ArrowLeft");
+setupMobileBtn(btnRight, "ArrowRight");
+btnBln.addEventListener("pointerdown", () => handleBalloon(0));
+
+// ─── HUD ───────────────────────────────────────────────────────────────────────
+
+function updateHUD(state: GameState): void {
+  hudEl.innerHTML = state.players
+    .map((p) => {
+      const hpBar = p.alive ? "❤️" : "💀";
+      const marker = p.id === localPlayerIndex && isOnline ? " ★" : "";
+      return `<div class="hud-player${p.alive ? "" : " dead"}" style="border-color:${p.color}">
+        <span class="hud-hat">${p.hat}</span>
+        <span>P${p.id + 1}${marker}</span>
+        <span>${hpBar}</span>
+        <span class="hud-score">${p.score}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+// ─── Map Selection ────────────────────────────────────────────────────────────
+
+function buildMapGrid(): void {
   mapGrid.innerHTML = "";
   for (const map of MAPS) {
-    const card = document.createElement("div");
+    const card = document.createElement("button");
     card.className = "map-card" + (map.id === selectedMapId ? " selected" : "");
-    card.dataset["id"] = map.id;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = 260;
-    canvas.height = 140;
-    drawMapPreview(canvas, map);
-
-    const badge = document.createElement("div");
-    badge.className = "sel-badge";
-    badge.textContent = "✓ SELECTED";
-
-    const info = document.createElement("div");
-    info.className = "map-info";
-    info.innerHTML = `
-      <span class="map-emoji">${map.emoji}</span>
-      <div>
-        <div class="map-name">${map.name}</div>
-        <div class="map-desc">${map.desc}</div>
-      </div>`;
-
-    card.appendChild(canvas);
-    card.appendChild(badge);
-    card.appendChild(info);
-    card.addEventListener("click", () => selectMap(map.id));
+    card.innerHTML = `<span class="map-emoji">${map.emoji}</span>
+      <span class="map-name">${map.name}</span>
+      <span class="map-desc">${map.desc}</span>`;
+    card.addEventListener("click", () => {
+      selectedMapId = map.id;
+      buildMapGrid();
+    });
     mapGrid.appendChild(card);
   }
 }
 
-function selectMap(id: string): void {
-  selectedMapId = id;
-  document.querySelectorAll(".map-card").forEach((c) => {
-    (c as HTMLElement).classList.toggle(
-      "selected",
-      (c as HTMLElement).dataset["id"] === id,
-    );
-  });
-}
-
 // ─── Game Start / Stop ────────────────────────────────────────────────────────
 
-function startGame(): void {
+function startGame(numOnlinePlayers = 1): void {
   const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-  state = createGameState(map, 3);
+  const numAI = isOnline ? 0 : 7; // solo: 7 AI; online: all humans
+  const numHumans = isOnline ? numOnlinePlayers : 1;
+  gameState = createGameState(map, numAI, numHumans);
+  initAI(gameState);
 
-  initRenderer(bgCanvas, spriteCanvas, debugCanvas);
-  initAI(state);
+  lobby.classList.add("hidden");
+  p2pPanel.classList.add("hidden");
+  gameWrap.classList.remove("hidden");
+  msgOverlay.classList.add("hidden");
 
-  lobby.style.display = "none";
-  gameWrap.style.display = "flex";
-  gtitle.textContent = map.emoji + " " + map.name;
-
-  updateHUD();
-  hideMessage();
-  lastTime = performance.now();
+  cancelAnimationFrame(rafId);
+  lastTime = 0;
   rafId = requestAnimationFrame(gameLoop);
-  tipEl.textContent = "Arrow Keys / WASD to move • Space to place balloon";
 }
 
-function stopGame(): void {
+function endGame(): void {
   cancelAnimationFrame(rafId);
-  state = null;
-  lobby.style.display = "flex";
-  gameWrap.style.display = "none";
-  hideMessage();
+  gameState = null;
+  isOnline = false;
+  localPlayerIndex = 0;
+  peer?.disconnect();
+  peer = null;
+  remoteInputQueue.length = 0;
+  setNetStatus("idle");
+  gameWrap.classList.add("hidden");
+  lobby.classList.remove("hidden");
+  buildMapGrid();
 }
 
 // ─── Game Loop ────────────────────────────────────────────────────────────────
 
-function gameLoop(now: number): void {
-  const dt = Math.min((now - lastTime) / 1000, 0.05);
-  lastTime = now;
-  if (!state) return;
+function gameLoop(ts: number): void {
+  if (!gameState) return;
+  const dt = lastTime ? Math.min((ts - lastTime) / 1000, 0.05) : 0.016;
+  lastTime = ts;
 
-  const human = state.players[0];
-  if (human?.alive && !human.moving) {
-    const dir = consumeDir();
-    if (dir) startMove(state, human, dir);
+  peer?.tick(dt);
+
+  if (isOnline) {
+    if (peer?.role === "host") {
+      hostFrame(dt);
+    } else {
+      guestFrame(dt);
+    }
+  } else {
+    soloFrame(dt);
   }
 
-  for (const p of state.players) {
-    if (p.isAI && p.alive) {
+  updateHUD(gameState);
+  drawBackground(gameState);
+  drawSprites(gameState, performance.now());
+  if (gameState.showDebug) drawDebug(gameState);
+
+  if (peer?.role === "host" && peer.status === "connected") {
+    netLatency.textContent = "";
+  } else if (peer?.role === "guest") {
+    netLatency.textContent = peer.latency > 0 ? `${peer.latency}ms` : "";
+  }
+
+  if (gameState.gameOver) {
+    showGameOver(gameState);
+    return;
+  }
+
+  rafId = requestAnimationFrame(gameLoop);
+}
+
+function soloFrame(dt: number): void {
+  if (!gameState) return;
+  const localPlayer = gameState.players[0];
+  if (localPlayer?.alive) {
+    setPlayerVelocity(localPlayer, getDirForPlayer(0));
+  }
+  for (const p of gameState.players) {
+    if (p.isAI) {
+      const state = gameState;
       updateAI(
         state,
         p,
         dt,
-        (player) => placeBalloon(state!, player),
-        (player, dir) => startMove(state!, player, dir),
+        (ai) => placeBalloon(state, ai),
+        (ai, dir) => setPlayerVelocity(ai, dir),
       );
     }
   }
+  updateGame(gameState, dt);
+}
 
-  updateGame(state, dt);
-  drawBackground(state);
-  drawSprites(state, now / 1000);
-  if (showDebug) drawDebug(state);
-  updateHUD();
+function hostFrame(dt: number): void {
+  if (!gameState || !peer) return;
 
-  if (state.gameOver) {
-    showEndMessage();
+  // Apply local P1 input
+  const localPlayer = gameState.players[0];
+  if (localPlayer?.alive) setPlayerVelocity(localPlayer, getDirForPlayer(0));
+
+  // Apply buffered guest inputs
+  const msgs = remoteInputQueue.splice(0);
+  for (const msg of msgs) {
+    if (msg.type === "input") {
+      const p = gameState.players[msg.playerId];
+      if (!p || !p.alive) continue;
+      if (msg.action === "move") {
+        setPlayerVelocity(p, msg.dir as Direction | null);
+      } else if (msg.action === "balloon") {
+        placeBalloon(gameState, p);
+      }
+    }
+  }
+
+  updateGame(gameState, dt);
+
+  // Snapshot to guests at ~20Hz (every frame is fine; PeerJS will coalesce)
+  peer.sendStateSync(buildStateSnapshot(gameState));
+}
+
+function guestFrame(dt: number): void {
+  if (!gameState || !peer) return;
+
+  const dir = getDirForPlayer(localPlayerIndex);
+  const localPlayer = gameState.players[localPlayerIndex];
+  if (localPlayer?.alive) {
+    setPlayerVelocity(localPlayer, dir);
+    peer.sendToHost({
+      type: "input",
+      playerId: localPlayerIndex,
+      action: "move",
+      dir: dir ?? "none",
+    });
+  }
+
+  // Guests do a lightweight local sim for responsiveness
+  updateGame(gameState, dt);
+}
+
+// ─── State Snapshot ───────────────────────────────────────────────────────────
+
+function buildStateSnapshot(state: GameState): StateSyncPayload {
+  return {
+    seq: 0, // filled in by sendStateSync
+    players: state.players.map((p) => ({
+      id: p.id,
+      row: p.row,
+      col: p.col,
+      px: p.px,
+      py: p.py,
+      vx: p.vx,
+      vy: p.vy,
+      alive: p.alive,
+      score: p.score,
+      invincible: p.invincible,
+      moveDir: p.moveDir,
+      maxBalloons: p.maxBalloons,
+      balloonRange: p.balloonRange,
+      speed: p.speed,
+    })),
+    balloons: state.balloons.map((b) => ({
+      id: b.id,
+      row: b.row,
+      col: b.col,
+      ownerId: b.ownerId,
+      timer: b.timer,
+      range: b.range,
+      trapped: b.trapped,
+    })),
+    explosions: state.explosions.map((e) => ({
+      row: e.row,
+      col: e.col,
+      timer: e.timer,
+    })),
+    powerUps: state.powerUps.map((u) => ({
+      id: u.id,
+      row: u.row,
+      col: u.col,
+      kind: u.kind,
+    })),
+    grid: state.grid,
+    gameOver: state.gameOver,
+    winner: state.winner,
+    elapsed: state.elapsed,
+  };
+}
+
+function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
+  for (const snap of payload.players) {
+    const p = state.players[snap.id];
+    if (!p) continue;
+    // Don't overwrite local player's position — let local prediction stand
+    if (snap.id !== localPlayerIndex) {
+      p.row = snap.row;
+      p.col = snap.col;
+      p.px = snap.px;
+      p.py = snap.py;
+      p.vx = snap.vx;
+      p.vy = snap.vy;
+    }
+    p.alive = snap.alive;
+    p.score = snap.score;
+    p.invincible = snap.invincible;
+    p.moveDir = snap.moveDir as Direction | null;
+    p.maxBalloons = snap.maxBalloons;
+    p.balloonRange = snap.balloonRange;
+    p.speed = snap.speed;
+  }
+  state.balloons = payload.balloons.map((b) => ({
+    ...b,
+    trapTimer: 0,
+    el: null,
+  }));
+  state.explosions = payload.explosions;
+  state.powerUps = payload.powerUps.map((u) => ({
+    ...u,
+    kind: u.kind as import("./game/types").PowerUpKind,
+    el: null,
+  }));
+  if (payload.grid)
+    state.grid = payload.grid as import("./game/types").TileType[][];
+  state.gameOver = payload.gameOver;
+  state.winner = payload.winner;
+  state.elapsed = payload.elapsed;
+}
+
+// ─── Game Over ────────────────────────────────────────────────────────────────
+
+function showGameOver(state: GameState): void {
+  let text: string;
+  if (state.winner !== null) {
+    const w = state.players[state.winner];
+    text = `${w?.hat ?? "🎉"} Player ${state.winner + 1} wins!`;
+  } else {
+    text = "🤝 Draw!";
+  }
+  msgBox.innerHTML = `<div class="msg-title">${text}</div>
+    <button id="replay-btn" class="msg-btn">▶ Play Again</button>
+    <button id="lobby-btn" class="msg-btn">🏠 Lobby</button>`;
+  msgOverlay.classList.remove("hidden");
+  (document.getElementById("replay-btn") as HTMLButtonElement).addEventListener(
+    "click",
+    () => startGame(isOnline ? (gameState?.players.length ?? 1) : 1),
+  );
+  (document.getElementById("lobby-btn") as HTMLButtonElement).addEventListener(
+    "click",
+    endGame,
+  );
+}
+
+// ─── Net Status Display ───────────────────────────────────────────────────────
+
+function setNetStatus(
+  s: "idle" | "connecting" | "connected" | "disconnected",
+): void {
+  const labels: Record<string, string> = {
+    idle: "Offline",
+    connecting: "Waiting for players…",
+    connected: "🟢 Online",
+    disconnected: "🔴 Disconnected",
+  };
+  netStatus.textContent = labels[s] ?? s;
+}
+
+function setP2pMsg(text: string, kind: "ok" | "err" | "" = ""): void {
+  p2pMsg.textContent = text;
+  p2pMsg.className = "p2p-msg" + (kind ? ` p2p-msg-${kind}` : "");
+}
+
+// ─── P2P Panel ────────────────────────────────────────────────────────────────
+
+function showP2pPanel(): void {
+  p2pPanel.classList.remove("hidden");
+  p2pHostStep.style.display = "none";
+  p2pGuestStep.style.display = "none";
+  setP2pMsg("Choose your role to start a multiplayer session.");
+}
+
+openP2pBtn.addEventListener("click", showP2pPanel);
+p2pCloseBtn.addEventListener("click", () => {
+  p2pPanel.classList.add("hidden");
+  if (peer) {
+    peer.disconnect();
+    peer = null;
+  }
+  isOnline = false;
+  setNetStatus("idle");
+});
+
+// ── Host flow ─────────────────────────────────────────────────────────────────
+
+p2pHostBtn.addEventListener("click", async () => {
+  if (peer) {
+    peer.disconnect();
+    peer = null;
+  }
+  isOnline = true;
+  localPlayerIndex = 0;
+
+  peer = new RoomPeer({
+    onGuestJoined(count) {
+      p2pGuestCount.textContent = `${count} guest${count !== 1 ? "s" : ""} connected`;
+      (p2pStartGameBtn as HTMLButtonElement).disabled = false;
+    },
+    onConnectedToHost() {
+      /* unused for host */
+    },
+    onDisconnected() {
+      setNetStatus("disconnected");
+      setP2pMsg("A guest disconnected.", "err");
+    },
+    onMessage(msg) {
+      if (msg.type === "input") remoteInputQueue.push(msg);
+    },
+    onStatusChange(s) {
+      setNetStatus(s);
+    },
+    onError(msg) {
+      setP2pMsg(msg, "err");
+    },
+  });
+
+  p2pHostStep.style.display = "block";
+  p2pGuestStep.style.display = "none";
+  p2pRoomCode.textContent = "…";
+  setP2pMsg("Creating room…");
+
+  try {
+    const code = await peer.createRoom();
+    p2pRoomCode.textContent = code;
+    setP2pMsg("Share this code with friends. Up to 7 guests can join.", "ok");
+  } catch (err) {
+    setP2pMsg(String(err instanceof Error ? err.message : err), "err");
+    peer = null;
+    isOnline = false;
+  }
+});
+
+p2pStartGameBtn.addEventListener("click", () => {
+  if (!peer || peer.role !== "host") return;
+  const total = peer.guestCount + 1;
+  const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
+  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0 });
+  startGame(total);
+});
+
+// ── Guest flow ────────────────────────────────────────────────────────────────
+
+p2pGuestBtn.addEventListener("click", () => {
+  p2pGuestStep.style.display = "block";
+  p2pHostStep.style.display = "none";
+  setP2pMsg("Type the host's room code and click Join.");
+});
+
+p2pJoinBtn.addEventListener("click", joinAsGuest);
+p2pJoinInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") joinAsGuest();
+});
+
+async function joinAsGuest(): Promise<void> {
+  const code = p2pJoinInput.value.trim().toUpperCase();
+  if (!code) {
+    setP2pMsg("Enter a room code.", "err");
     return;
   }
-  rafId = requestAnimationFrame(gameLoop);
-}
-
-function consumeDir(): Direction | null {
-  if (keysHeld.has("ArrowUp") || keysHeld.has("KeyW")) return "up";
-  if (keysHeld.has("ArrowDown") || keysHeld.has("KeyS")) return "down";
-  if (keysHeld.has("ArrowLeft") || keysHeld.has("KeyA")) return "left";
-  if (keysHeld.has("ArrowRight") || keysHeld.has("KeyD")) return "right";
-  return null;
-}
-
-// ─── HUD ──────────────────────────────────────────────────────────────────────
-
-function updateHUD(): void {
-  if (!state) return;
-  hud.innerHTML = state.players
-    .map(
-      (p) => `
-    <div class="hud-box" style="border-color:${p.color}40">
-      <span>${p.hat}</span>
-      P${p.id + 1}${p.isAI ? " 🤖" : ""}
-      ${p.alive ? "" : '<span style="color:#ef5350"> ✕</span>'}
-      &nbsp;🏆<span>${p.score}</span>
-    </div>
-  `,
-    )
-    .join("");
-}
-
-// ─── Messages ─────────────────────────────────────────────────────────────────
-
-function showEndMessage(): void {
-  if (!state) return;
-  const winner = state.winner !== null ? state.players[state.winner] : null;
-  msgBox.innerHTML = winner
-    ? `<h2>${winner.hat} ${winner.isAI ? "CPU" : "You"} Win!</h2>
-       <p>Player ${winner.id + 1} survived the chaos!</p>
-       <button class="msg-btn" style="background:#ffd600;color:#1a237e" id="replay-btn">▶ Play Again</button>
-       <button class="msg-btn" style="background:rgba(255,255,255,.15);color:#fff" id="lobby-btn">🏠 Lobby</button>`
-    : `<h2>💥 Draw!</h2>
-       <p>Everyone was caught in the blast!</p>
-       <button class="msg-btn" style="background:#ffd600;color:#1a237e" id="replay-btn">▶ Play Again</button>
-       <button class="msg-btn" style="background:rgba(255,255,255,.15);color:#fff" id="lobby-btn">🏠 Lobby</button>`;
-
-  msgOverlay.classList.remove("hidden");
-  document.getElementById("replay-btn")?.addEventListener("click", startGame);
-  document.getElementById("lobby-btn")?.addEventListener("click", stopGame);
-}
-
-function hideMessage(): void {
-  msgOverlay.classList.add("hidden");
-}
-
-// ─── Input ────────────────────────────────────────────────────────────────────
-
-document.addEventListener("keydown", (e) => {
-  keysHeld.add(e.code);
-  if (!state?.running) return;
-  if (e.code === "Space" || e.code === "KeyX") {
-    e.preventDefault();
-    const human = state.players[0];
-    if (human?.alive) placeBalloon(state, human);
+  if (peer) {
+    peer.disconnect();
+    peer = null;
   }
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code))
-    e.preventDefault();
-});
 
-document.addEventListener("keyup", (e) => keysHeld.delete(e.code));
+  isOnline = true;
+  p2pJoinBtn.disabled = true;
+  setP2pMsg("Connecting…");
 
-function bindMobileBtn(id: string, action: () => void): void {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener(
-    "touchstart",
-    (e) => {
-      e.preventDefault();
-      action();
+  peer = new RoomPeer({
+    onGuestJoined() {
+      /* unused for guest */
     },
-    { passive: false },
-  );
-  el.addEventListener("mousedown", () => action());
+    onConnectedToHost(playerIndex) {
+      localPlayerIndex = playerIndex;
+      setP2pMsg(
+        `Connected as Player ${playerIndex + 1}. Waiting for host to start…`,
+        "ok",
+      );
+      setNetStatus("connected");
+    },
+    onDisconnected() {
+      setNetStatus("disconnected");
+      setP2pMsg("Disconnected from host.", "err");
+    },
+    onMessage(msg) {
+      if (!gameState) {
+        // Pre-game: wait for "start" broadcast from host
+        if (msg.type === "start" && msg.mapId) {
+          selectedMapId = msg.mapId;
+          startGame(localPlayerIndex + 1);
+        }
+      } else {
+        // In-game: apply authoritative state snapshots
+        if (msg.type === "state_sync") {
+          applyStateSnapshot(gameState, msg.payload);
+        }
+      }
+    },
+    onStatusChange(s) {
+      setNetStatus(s);
+    },
+    onError(msg) {
+      setP2pMsg(msg, "err");
+      p2pJoinBtn.disabled = false;
+      isOnline = false;
+      peer = null;
+    },
+  });
+
+  try {
+    await peer.joinRoom(code);
+    p2pJoinBtn.disabled = false;
+  } catch (err) {
+    setP2pMsg(String(err instanceof Error ? err.message : err), "err");
+    p2pJoinBtn.disabled = false;
+    isOnline = false;
+    peer = null;
+  }
 }
 
-bindMobileBtn("btn-up", () => {
-  if (state?.players[0]?.alive) startMove(state!, state!.players[0], "up");
-});
-bindMobileBtn("btn-down", () => {
-  if (state?.players[0]?.alive) startMove(state!, state!.players[0], "down");
-});
-bindMobileBtn("btn-left", () => {
-  if (state?.players[0]?.alive) startMove(state!, state!.players[0], "left");
-});
-bindMobileBtn("btn-right", () => {
-  if (state?.players[0]?.alive) startMove(state!, state!.players[0], "right");
-});
-bindMobileBtn("btn-bln", () => {
-  if (state?.players[0]?.alive) placeBalloon(state!, state!.players[0]);
+// ─── Lobby / Navigation ───────────────────────────────────────────────────────
+
+playBtn.addEventListener("click", () => {
+  isOnline = false;
+  localPlayerIndex = 0;
+  startGame(1);
 });
 
+backBtn.addEventListener("click", endGame);
+
+// ─── Debug Toggle ──────────────────────────────────────────────────────────────
+
+const togglePill = debugToggle.querySelector(".toggle-pill") as HTMLElement;
+let debugOn = false;
 debugToggle.addEventListener("click", () => {
-  showDebug = !showDebug;
-  debugCanvas.classList.toggle("vis", showDebug);
-  debugToggle.querySelector(".toggle-pill")?.classList.toggle("on", showDebug);
+  debugOn = !debugOn;
+  togglePill.classList.toggle("on", debugOn);
+  if (gameState) gameState.showDebug = debugOn;
 });
 
-backBtn.addEventListener("click", stopGame);
-playBtn.addEventListener("click", startGame);
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
-
-buildLobby();
-
-const wrapper = document.getElementById("wrapper")!;
-for (let i = 0; i < 10; i++) {
-  const b = document.createElement("div");
-  b.className = "bg-bubble";
-  const size = 20 + Math.random() * 80;
-  b.style.cssText = `width:${size}px;height:${size}px;left:${Math.random() * 100}%;bottom:${Math.random() * -200}px;animation-duration:${8 + Math.random() * 12}s;animation-delay:${-Math.random() * 15}s;`;
-  wrapper.appendChild(b);
-}
+initRenderer(bgCanvas, spriteCanvas, debugCanvas);
+buildMapGrid();

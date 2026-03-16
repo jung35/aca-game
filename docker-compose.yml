@@ -1,0 +1,24 @@
+# ── docker-compose.yml ────────────────────────────────────────────────────────
+# Run the Vite dev server inside Docker with full hot-reload support.
+#
+# Usage:
+#   docker compose up          (or docker-compose up on older Docker)
+#   docker compose up --build  (rebuild after changing package.json)
+
+services:
+  dev:
+    build: .
+    container_name: aca-game-dev
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount the whole project so Vite's HMR watches real source files.
+      - .:/app
+      # Keep node_modules inside the container — don't overwrite with the
+      # host's Windows node_modules (wrong platform binaries).
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    # Vite needs inotify to watch files; this keeps the container alive.
+    stdin_open: true
+    tty: true

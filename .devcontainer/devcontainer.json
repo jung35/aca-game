@@ -1,0 +1,45 @@
+// For format details, see https://aka.ms/devcontainer.json
+{
+  "name": "Crazy Arcade – Dev Container",
+
+  // Use only the root docker-compose.yml — the .devcontainer override adds
+  // the workspace mount and keeps the container alive for VS Code.
+  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.yml"],
+
+  "service": "dev",
+
+  // Must match the volume target in .devcontainer/docker-compose.yml
+  "workspaceFolder": "/app",
+
+  // Forward Vite's dev server port to the host automatically
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "Vite Dev Server",
+      "onAutoForward": "openBrowser"
+    }
+  },
+
+  // Install deps and start the dev server once the container is ready
+  "postCreateCommand": "npm install",
+  "postStartCommand": "npm run dev",
+
+  // Recommended VS Code extensions inside the container
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "ms-vscode.vscode-typescript-next",
+        "bradlc.vscode-tailwindcss"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+
+  // Keep the container running when VS Code disconnects
+  "shutdownAction": "stopCompose"
+}
