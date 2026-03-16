@@ -9,12 +9,12 @@ export type NetMessage =
   | { type: "input"; playerId: number; action: "move"; dir: string }
   | { type: "input"; playerId: number; action: "balloon" }
   | { type: "state_sync"; payload: StateSyncPayload }
-  | { type: "start"; mapId: string; seed: number; playerIndex: number; playerCount?: number }
+  | { type: "start"; mapId: string; seed: number; playerIndex: number; playerCount?: number; playerConfigs?: Array<{ name: string; outfit: string; skinTone: string; team: number }> }
   | { type: "ping"; t: number }
   | { type: "pong"; t: number }
   | { type: "chat"; text: string }
   /** Guest → host: introduce yourself with name after receiving slot assignment. */
-  | { type: "hello"; name: string; playerIndex: number }
+  | { type: "hello"; name: string; playerIndex: number; outfit: string; skinTone: string }
   /** Host → all guests: current lobby state (slots + selected map). */
   | { type: "lobby_state"; slots: LobbySlot[]; mapId: string }
   /** Host → one guest: you are being kicked. */

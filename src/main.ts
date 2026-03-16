@@ -317,7 +317,7 @@ function startGame(numOnlinePlayers = 1): void {
   const numAI = isOnline ? aiSlots.size : 7; // solo: 7 AI; online: only host-added AI slots
   const numHumans = isOnline ? numOnlinePlayers : 1;
 
-  // Build player configs — local player gets char customization; all slots get host-assigned teams
+  // Build player configs — merge local config, guest configs, and host-assigned teams
   const playerConfigs: PlayerConfig[] = [];
   for (let i = 0; i < numHumans + numAI; i++) {
     const assignedTeam = slotTeams.get(i) ?? 0;
@@ -329,7 +329,14 @@ function startGame(numOnlinePlayers = 1): void {
         name: getPlayerName(),
       };
     } else {
-      playerConfigs[i] = { team: assignedTeam };
+      const gc = guestConfigs.get(i);
+      const guestName = connectedPlayers.get(i) ?? `P${i + 1}`;
+      playerConfigs[i] = {
+        outfit: gc?.outfit,
+        skinTone: gc?.skinTone,
+        team: assignedTeam,
+        name: guestName,
+      };
     }
   }
 
@@ -363,6 +370,7 @@ function endGame(): void {
   connectedPlayers.clear();
   aiSlots.clear();
   slotTeams.clear();
+  guestConfigs.clear();
   p2pStartGameBtn.disabled = true;
   msgOverlay.classList.add("hidden");
   gameWrap.classList.add("hidden");
@@ -641,6 +649,8 @@ const connectedPlayers = new Map<number, string>();
 const aiSlots = new Set<number>();
 /** Team assignment per slot index (0-7). Host-authoritative. 0 = no team. */
 const slotTeams = new Map<number, number>();
+/** Guest character configs received via "hello": playerIndex → config */
+const guestConfigs = new Map<number, { outfit: string; skinTone: string }>();
 
 /** Update the char-picker card background to reflect the local player's team. */
 function updateCharPickerTeamBg(): void {
@@ -808,6 +818,7 @@ async function initHostRoom(): Promise<void> {
   connectedPlayers.clear();
   aiSlots.clear();
   slotTeams.clear();
+  guestConfigs.clear();
   setRoomStatus("Creating room…");
 
   peer = new RoomPeer({
@@ -838,8 +849,9 @@ async function initHostRoom(): Promise<void> {
     },
     onMessage(msg) {
       if (msg.type === "hello") {
-        // Guest introduced themselves with a name
+        // Guest introduced themselves — store name and char config
         connectedPlayers.set(msg.playerIndex, msg.name || `P${msg.playerIndex + 1}`);
+        guestConfigs.set(msg.playerIndex, { outfit: msg.outfit, skinTone: msg.skinTone });
         buildSlotsGrid();
         broadcastLobbyState();
         return;
@@ -888,7 +900,19 @@ p2pStartGameBtn.addEventListener("click", () => {
   if (!peer || peer.role !== "host") return;
   const total = peer.guestCount + 1;
   const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0, playerCount: total });
+
+  // Build configs first so we can broadcast them to guests before starting
+  const numAI = aiSlots.size;
+  const serializedConfigs = Array.from({ length: total + numAI }, (_, i) => {
+    const team = slotTeams.get(i) ?? 0;
+    if (i === 0) {
+      return { name: getPlayerName(), outfit: localCharConfig.outfit, skinTone: localCharConfig.skinTone, team };
+    }
+    const gc = guestConfigs.get(i);
+    return { name: connectedPlayers.get(i) ?? `P${i + 1}`, outfit: gc?.outfit ?? "", skinTone: gc?.skinTone ?? "", team };
+  });
+
+  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0, playerCount: total, playerConfigs: serializedConfigs });
   startGame(total);
 });
 
@@ -921,7 +945,13 @@ async function joinAsGuest(): Promise<void> {
       p2pStartGameBtn.disabled = true; // only host can start
 
       // Introduce ourselves to the host
-      peer?.sendToHost({ type: "hello", name: getPlayerName(), playerIndex });
+      peer?.sendToHost({
+        type: "hello",
+        name: getPlayerName(),
+        playerIndex,
+        outfit: localCharConfig.outfit,
+        skinTone: localCharConfig.skinTone,
+      });
 
       // Lock map selection — guest cannot change map
       setMapGridLocked(true);
@@ -976,6 +1006,19 @@ async function joinAsGuest(): Promise<void> {
         if (msg.type === "start" && msg.mapId) {
           selectedMapId = msg.mapId;
           const total = msg.playerCount ?? localPlayerIndex + 1;
+          // Apply host-provided player configs (outfit, skin, team, name for all slots)
+          if (msg.playerConfigs) {
+            guestConfigs.clear();
+            slotTeams.clear();
+            msg.playerConfigs.forEach((cfg, i) => {
+              if (i === localPlayerIndex) return; // own config stays as-is
+              guestConfigs.set(i, { outfit: cfg.outfit, skinTone: cfg.skinTone });
+              if (cfg.team > 0) slotTeams.set(i, cfg.team);
+            });
+            // Apply own team from the host's config
+            const myTeam = msg.playerConfigs[localPlayerIndex]?.team ?? 0;
+            slotTeams.set(localPlayerIndex, myTeam);
+          }
           setMapGridLocked(false);
           startGame(total);
         }
