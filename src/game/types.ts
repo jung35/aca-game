@@ -14,7 +14,7 @@ export interface Vec2 {
 
 // ─── Map / Tile ───────────────────────────────────────────────────────────────
 
-export type TileType = 0 | 1 | 2; // 0 = floor, 1 = solid wall, 2 = destructible block
+export type TileType = 0 | 1 | 2 | 3; // 0 = floor, 1 = solid wall, 2 = destructible block, 3 = spawn point (treated as floor at runtime)
 
 export interface MapDef {
   id: string;
@@ -54,6 +54,24 @@ export interface Player {
   invincibleTimer: number;
   /** facing direction for rendering */
   moveDir: Direction | null;
+  /** last non-null direction, for idle facing */
+  lastDir: Direction;
+  /** 0 = no team, 1-4 = team index */
+  team: number;
+  /** Chosen outfit style key, e.g. "classic", "ninja", "sport" */
+  outfit: string;
+  /** Skin tone hex */
+  skinTone: string;
+  /** Display name */
+  name: string;
+  /** Walk animation frame accumulator (seconds) */
+  walkTime: number;
+  /** True when the player is trapped inside a water balloon */
+  trappedInBalloon: boolean;
+  /** Id of the balloon trapping this player, or -1 */
+  trapBalloonId: number;
+  /** Countdown until the trapping balloon auto-explodes and kills the player */
+  trapCountdown: number;
 }
 
 // ─── Balloon ──────────────────────────────────────────────────────────────────
@@ -108,6 +126,7 @@ export interface GameState {
   paused: boolean;
   gameOver: boolean;
   winner: number | null; // player id or null for draw
+  winnerTeam: number | null; // winning team index, or null
   nextBalloonId: number;
   nextPowerUpId: number;
   showDebug: boolean;

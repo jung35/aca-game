@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;800;900&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/src/style.css" />
@@ -21,75 +21,78 @@
           <span>WATER BALLOON BATTLE</span>
         </div>
 
-        <div id="map-grid"></div>
-
-        <div id="lobby-actions">
-          <button id="play-btn">▶ Play!</button>
-          <button id="open-p2p-btn">🌐 Online P2P</button>
+        <!-- ── Online Room Panel (always visible) ── -->
+        <div id="room-panel">
+          <div id="room-left">
+            <div class="room-section-label">YOUR ROOM CODE</div>
+            <div id="room-code-display">
+              <span id="lobby-room-code">……</span>
+              <button id="room-copy-btn" title="Copy room code">📋</button>
+              <button id="room-refresh-btn" title="New room code">🔄</button>
+            </div>
+            <div id="room-status-line">Waiting for players…</div>
+          </div>
+          <div id="room-divider"></div>
+          <div id="room-right">
+            <div class="room-section-label">JOIN A ROOM</div>
+            <div id="room-join-row">
+              <input id="room-join-input" type="text" maxlength="8"
+                placeholder="Enter code…" autocomplete="off" spellcheck="false" />
+              <button id="room-join-btn">⚡ Join</button>
+            </div>
+            <div id="room-join-msg"></div>
+          </div>
         </div>
 
-        <div id="net-bar">
-          <span id="net-status">Offline</span>
+        <!-- ── Player slots grid ── -->
+        <div id="slots-grid">
+          <!-- 8 slots rendered by JS -->
+        </div>
+
+        <!-- ── Map grid ── -->
+        <div id="map-grid"></div>
+
+        <div id="name-row">
+          <label id="name-label" for="name-input">👤 Your Name</label>
+          <div id="name-field">
+            <input id="name-input" type="text" maxlength="16" autocomplete="off" spellcheck="false" />
+            <button id="name-random-btn" title="Random name">🎲</button>
+          </div>
+        </div>
+
+        <!-- Character customization + Team picker -->
+        <div id="char-picker">
+          <div id="char-preview-col">
+            <canvas id="char-preview" width="70" height="80"></canvas>
+            <div id="char-preview-label">Preview</div>
+          </div>
+          <div id="char-options">
+            <div class="char-row">
+              <span class="char-row-label">👕 Outfit</span>
+              <div id="outfit-cards" class="outfit-row"></div>
+            </div>
+            <div class="char-row">
+              <span class="char-row-label">🧑 Skin</span>
+              <div id="skin-swatches" class="swatch-row"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="lobby-actions">
+          <button id="play-btn">▶ Solo vs AI</button>
+          <button id="p2p-start-game-btn" class="p2p-action-btn" disabled>▶ Start Online</button>
+        </div>
+        <div id="net-status-bar">
+          <span id="net-status">🔴 Not connected</span>
           <span id="net-latency"></span>
         </div>
       </div>
 
-      <!-- ── P2P Panel ──────────────────────────────── -->
-      <div id="p2p-panel" class="hidden">
-        <div id="p2p-inner">
-          <button id="p2p-close" title="Close">✕</button>
-          <h3>🌐 Online Multiplayer — Up to 8 Players</h3>
-          <p class="p2p-intro">
-            Share a <strong>room code</strong> with up to 7 friends.<br />
-            One person hosts — everyone else joins with the code.
-          </p>
-
-          <div id="p2p-role-btns">
-            <button id="p2p-host-btn">🏠 Create Room (Host)</button>
-            <button id="p2p-guest-btn">🚪 Join Room (Guest)</button>
-          </div>
-
-          <!-- Host step -->
-          <div id="p2p-host-step" style="display: none">
-            <div class="p2p-code-display">
-              <span class="p2p-code-label">Room Code</span>
-              <span id="p2p-room-code">……</span>
-            </div>
-            <p id="p2p-guest-count" class="p2p-guest-count">
-              0 guests connected
-            </p>
-            <button id="p2p-start-game-btn" class="p2p-action-btn" disabled>
-              ▶ Start Game
-            </button>
-          </div>
-
-          <!-- Guest step -->
-          <div id="p2p-guest-step" style="display: none">
-            <label class="p2p-field-label">Enter the host's Room Code:</label>
-            <div class="p2p-join-row">
-              <input
-                id="p2p-join-input"
-                type="text"
-                maxlength="8"
-                placeholder="e.g. AB3X7K"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <button id="p2p-join-btn" class="p2p-action-btn">⚡ Join</button>
-            </div>
-          </div>
-
-          <div id="p2p-msg" class="p2p-msg">
-            Choose your role to start a multiplayer session.
-          </div>
-        </div>
-      </div>
-
       <!-- ── Game ──────────────────────────────────── -->
-      <div id="game-wrap">
+      <div id="game-wrap" class="hidden">
         <div id="game-topbar">
           <button id="back-btn">◀ Lobby</button>
-          <div id="gtitle">Game</div>
+          <div id="gtitle">💣 Crazy Arcade</div>
           <div class="toggle-wrap" id="debug-toggle">
             <span class="toggle-label">Debug</span>
             <div class="toggle-pill">
@@ -98,30 +101,30 @@
           </div>
         </div>
 
-        <div id="hud"></div>
+        <div id="game-body">
+          <div id="arena-wrap">
+            <div id="arena-outer">
+              <div id="arena">
+                <canvas id="bg-canvas"></canvas>
+                <canvas id="sprite-canvas"></canvas>
+                <canvas id="debug-canvas"></canvas>
+              </div>
+            </div>
+            <div id="tip">
+              Move: <kbd>↑↓←→</kbd> / <kbd>WASD</kbd> &nbsp;|&nbsp;
+              Balloon: <kbd>Space</kbd> / <kbd>X</kbd>
+            </div>
+          </div>
 
-        <div id="arena-outer">
-          <div id="arena">
-            <canvas id="bg-canvas" width="630" height="510"></canvas>
-            <canvas id="sprite-canvas" width="630" height="510"></canvas>
-            <canvas id="debug-canvas" width="630" height="510"></canvas>
+          <div id="sidebar">
+            <div id="sidebar-title">PLAYERS</div>
+            <div id="hud"></div>
+            <div id="net-bar">
+              <span id="net-status">Offline</span>
+              <span id="net-latency"></span>
+            </div>
           </div>
         </div>
-
-        <!-- Mobile controls -->
-        <div id="controls">
-          <div class="ctrl-pad">
-            <div></div>
-            <button class="ctrl-btn" id="btn-up">▲</button>
-            <div></div>
-            <button class="ctrl-btn" id="btn-left">◀</button>
-            <button class="ctrl-btn" id="btn-down">▼</button>
-            <button class="ctrl-btn" id="btn-right">▶</button>
-          </div>
-          <button class="ctrl-btn bln-btn" id="btn-bln">💣</button>
-        </div>
-
-        <div id="tip">Arrow Keys / WASD to move • Space to place balloon</div>
       </div>
 
       <!-- ── Message overlay ───────────────────────── -->

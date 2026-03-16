@@ -12,23 +12,33 @@
 import "./style.css";
 import { MAPS } from "./game/maps";
 import { createGameState } from "./game/gameState";
+import type { PlayerConfig } from "./game/gameState";
 import {
   initRenderer,
+  resizeRenderer,
   drawBackground,
   drawSprites,
   drawDebug,
-} from "./game/renderer";
-import { updateGame, setPlayerVelocity, placeBalloon } from "./game/physics";
-import { initAI, updateAI } from "./game/ai";
+} from "./game/renderer/index";
+import { drawPreviewCharacter } from "./game/renderer/sprites";
+import {
+  updateGame,
+  setPlayerVelocity,
+  placeBalloon,
+} from "./game/physics/index";
+import { initAI, updateAI } from "./game/ai/index";
 import type { GameState, Direction } from "./game/types";
-import { RoomPeer } from "./game/netcode";
-import type { NetMessage, StateSyncPayload } from "./game/netcode";
-
+import { RoomPeer } from "./game/netcode/index";
+import type { NetMessage, StateSyncPayload, LobbySlot } from "./game/netcode/index";
+import {
+  SKIN_TONES,
+  TEAM_COLORS,
+  OUTFIT_STYLES,
+} from "./game/constants";
 // ─── DOM References ────────────────────────────────────────────────────────────
 
 const lobby = document.getElementById("lobby") as HTMLElement;
 const gameWrap = document.getElementById("game-wrap") as HTMLElement;
-const p2pPanel = document.getElementById("p2p-panel") as HTMLElement;
 const mapGrid = document.getElementById("map-grid") as HTMLElement;
 const hudEl = document.getElementById("hud") as HTMLElement;
 const msgOverlay = document.getElementById("msg-overlay") as HTMLElement;
@@ -38,44 +48,24 @@ const netLatency = document.getElementById("net-latency") as HTMLElement;
 
 // Buttons
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
-const openP2pBtn = document.getElementById("open-p2p-btn") as HTMLButtonElement;
 const backBtn = document.getElementById("back-btn") as HTMLButtonElement;
-const p2pCloseBtn = document.getElementById("p2p-close") as HTMLButtonElement;
-const p2pHostBtn = document.getElementById("p2p-host-btn") as HTMLButtonElement;
-const p2pGuestBtn = document.getElementById(
-  "p2p-guest-btn",
-) as HTMLButtonElement;
-const p2pStartGameBtn = document.getElementById(
-  "p2p-start-game-btn",
-) as HTMLButtonElement;
-const p2pJoinBtn = document.getElementById("p2p-join-btn") as HTMLButtonElement;
+const p2pStartGameBtn = document.getElementById("p2p-start-game-btn") as HTMLButtonElement;
 const debugToggle = document.getElementById("debug-toggle") as HTMLElement;
 
-// P2P panel sub-sections
-const p2pHostStep = document.getElementById("p2p-host-step") as HTMLElement;
-const p2pGuestStep = document.getElementById("p2p-guest-step") as HTMLElement;
-const p2pRoomCode = document.getElementById("p2p-room-code") as HTMLElement;
-const p2pGuestCount = document.getElementById("p2p-guest-count") as HTMLElement;
-const p2pJoinInput = document.getElementById(
-  "p2p-join-input",
-) as HTMLInputElement;
-const p2pMsg = document.getElementById("p2p-msg") as HTMLElement;
+// Room panel (always-on inline room UI)
+const lobbyRoomCode = document.getElementById("lobby-room-code") as HTMLElement;
+const roomStatusLine = document.getElementById("room-status-line") as HTMLElement;
+const roomCopyBtn = document.getElementById("room-copy-btn") as HTMLButtonElement;
+const roomRefreshBtn = document.getElementById("room-refresh-btn") as HTMLButtonElement;
+const roomJoinInput = document.getElementById("room-join-input") as HTMLInputElement;
+const roomJoinBtn = document.getElementById("room-join-btn") as HTMLButtonElement;
+const roomJoinMsg = document.getElementById("room-join-msg") as HTMLElement;
+const slotsGrid = document.getElementById("slots-grid") as HTMLElement;
 
 // Canvases
 const bgCanvas = document.getElementById("bg-canvas") as HTMLCanvasElement;
-const spriteCanvas = document.getElementById(
-  "sprite-canvas",
-) as HTMLCanvasElement;
-const debugCanvas = document.getElementById(
-  "debug-canvas",
-) as HTMLCanvasElement;
-
-// Mobile controls
-const btnUp = document.getElementById("btn-up") as HTMLButtonElement;
-const btnDown = document.getElementById("btn-down") as HTMLButtonElement;
-const btnLeft = document.getElementById("btn-left") as HTMLButtonElement;
-const btnRight = document.getElementById("btn-right") as HTMLButtonElement;
-const btnBln = document.getElementById("btn-bln") as HTMLButtonElement;
+const spriteCanvas = document.getElementById("sprite-canvas") as HTMLCanvasElement;
+const debugCanvas = document.getElementById("debug-canvas") as HTMLCanvasElement;
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -90,13 +80,119 @@ let lastTime = 0;
 /** Input queue for guest messages received by the host. */
 const remoteInputQueue: NetMessage[] = [];
 
+/** Last known direction per remote player index (host side). */
+const remoteDir = new Map<number, Direction | null>();
+
+// ─── Character Customization State ────────────────────────────────────────────
+
+const CHAR_CONFIG_KEY = "crazarc_char_config";
+
+interface CharConfig {
+  outfit: string;
+  skinTone: string;
+  team: number; // 0 = none, 1-4 = team
+}
+
+let localCharConfig: CharConfig = {
+  outfit: OUTFIT_STYLES[0].key,
+  skinTone: SKIN_TONES[0],
+  team: 0,
+};
+
+function loadCharConfig(): void {
+  try {
+    const saved = localStorage.getItem(CHAR_CONFIG_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved) as Partial<CharConfig>;
+      localCharConfig = { ...localCharConfig, ...parsed };
+    }
+  } catch {}
+}
+
+function saveCharConfig(): void {
+  try {
+    localStorage.setItem(CHAR_CONFIG_KEY, JSON.stringify(localCharConfig));
+  } catch {}
+}
+
+// Char preview canvas
+let charPreviewAnimId = 0;
+
+function buildCharPicker(): void {
+  buildOutfitCards();
+  buildSkinSwatches();
+  renderCharPreview();
+}
+
+function buildOutfitCards(): void {
+  const container = document.getElementById("outfit-cards");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const outfit of OUTFIT_STYLES) {
+    const btn = document.createElement("button");
+    btn.className = "outfit-card" + (outfit.key === localCharConfig.outfit ? " outfit-active" : "");
+    btn.innerHTML = `<span class="outfit-emoji">${outfit.emoji}</span><span class="outfit-label">${outfit.label}</span>`;
+    btn.title = outfit.label;
+    btn.addEventListener("click", () => {
+      localCharConfig.outfit = outfit.key;
+      saveCharConfig();
+      buildOutfitCards();
+      renderCharPreview();
+    });
+    container.appendChild(btn);
+  }
+}
+
+function buildSkinSwatches(): void {
+  const container = document.getElementById("skin-swatches");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const tone of SKIN_TONES) {
+    const btn = document.createElement("button");
+    btn.className = "swatch" + (tone === localCharConfig.skinTone ? " swatch-active" : "");
+    btn.style.background = tone;
+    btn.title = tone;
+    btn.addEventListener("click", () => {
+      localCharConfig.skinTone = tone;
+      saveCharConfig();
+      container.querySelectorAll(".swatch").forEach(s => s.classList.remove("swatch-active"));
+      btn.classList.add("swatch-active");
+      renderCharPreview();
+    });
+    container.appendChild(btn);
+  }
+}
+
+function renderCharPreview(): void {
+  const canvas = document.getElementById("char-preview") as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  cancelAnimationFrame(charPreviewAnimId);
+
+  function frame() {
+    if (!ctx) return;
+    const now = performance.now();
+    ctx.clearRect(0, 0, canvas!.width, canvas!.height);
+    ctx.save();
+    // Centre in canvas, shift down so feet sit near the bottom (leaving ~8px gap)
+    ctx.translate(canvas!.width / 2, canvas!.height - 8);
+    drawPreviewCharacter(ctx, localCharConfig.outfit, localCharConfig.skinTone, localCharConfig.team, now);
+    ctx.restore();
+    charPreviewAnimId = requestAnimationFrame(frame);
+  }
+
+  frame();
+}
+
 // ─── Keyboard Input ────────────────────────────────────────────────────────────
 
 const keysDown = new Set<string>();
 
 document.addEventListener("keydown", (e) => {
   keysDown.add(e.code);
-  if (e.code === "Space" || e.code === "KeyX") handleBalloon(0);
+  if (e.code === "Space" || e.code === "KeyX") handleBalloon(localPlayerIndex);
   if (e.code === "KeyM") handleBalloon(localPlayerIndex);
 });
 
@@ -105,10 +201,13 @@ document.addEventListener("keyup", (e) => {
 });
 
 function getDirForPlayer(idx: number): Direction | null {
-  if (idx === 0) {
-    if (keysDown.has("ArrowUp") || keysDown.has("KeyW")) return "up";
-    if (keysDown.has("ArrowDown") || keysDown.has("KeyS")) return "down";
-    if (keysDown.has("ArrowLeft") || keysDown.has("KeyA")) return "left";
+  // In online mode the guest is always on their own machine — always use
+  // Arrow / WASD as primary keys regardless of player slot index.
+  // IJKL is kept as an alternative for local split-screen (solo only).
+  if (idx === 0 || isOnline) {
+    if (keysDown.has("ArrowUp")    || keysDown.has("KeyW")) return "up";
+    if (keysDown.has("ArrowDown")  || keysDown.has("KeyS")) return "down";
+    if (keysDown.has("ArrowLeft")  || keysDown.has("KeyA")) return "left";
     if (keysDown.has("ArrowRight") || keysDown.has("KeyD")) return "right";
   } else {
     if (keysDown.has("KeyI")) return "up";
@@ -128,7 +227,7 @@ function handleBalloon(playerIdx: number): void {
   )
     return;
   const player = gameState.players[playerIdx];
-  if (!player || !player.alive) return;
+  if (!player || !player.alive || player.trappedInBalloon) return;
 
   if (isOnline && peer?.role === "guest" && playerIdx === localPlayerIndex) {
     peer.sendToHost({
@@ -142,30 +241,36 @@ function handleBalloon(playerIdx: number): void {
 }
 
 // ─── Mobile controls ───────────────────────────────────────────────────────────
+// (buttons removed — keyboard only)
 
-function setupMobileBtn(el: HTMLButtonElement, code: string) {
-  el.addEventListener("pointerdown", () => keysDown.add(code));
-  el.addEventListener("pointerup", () => keysDown.delete(code));
-  el.addEventListener("pointerleave", () => keysDown.delete(code));
-}
-setupMobileBtn(btnUp, "ArrowUp");
-setupMobileBtn(btnDown, "ArrowDown");
-setupMobileBtn(btnLeft, "ArrowLeft");
-setupMobileBtn(btnRight, "ArrowRight");
-btnBln.addEventListener("pointerdown", () => handleBalloon(0));
 
 // ─── HUD ───────────────────────────────────────────────────────────────────────
 
 function updateHUD(state: GameState): void {
+  const TEAM_CLR = ["#ef5350","#42a5f5","#66bb6a","#ffa726"];
+  const TEAM_NM  = ["Red","Blue","Green","Orange"];
   hudEl.innerHTML = state.players
     .map((p) => {
-      const hpBar = p.alive ? "❤️" : "💀";
-      const marker = p.id === localPlayerIndex && isOnline ? " ★" : "";
-      return `<div class="hud-player${p.alive ? "" : " dead"}" style="border-color:${p.color}">
+      const isLocal = p.id === localPlayerIndex && isOnline;
+      const statusIcon = p.alive ? (p.invincible ? "⚡" : "❤️") : "💀";
+      const marker = isLocal ? " ★" : "";
+      const teamDot = p.team > 0
+        ? `<span class="hud-team-dot" style="background:${TEAM_CLR[p.team-1]}" title="${TEAM_NM[p.team-1]} Team"></span>`
+        : "";
+      const displayName = p.name && p.name !== `P${p.id + 1}` ? p.name : `P${p.id + 1}`;
+      return `<div class="hud-player${p.alive ? "" : " dead"}" style="border-color:${p.color};color:${p.color}">
         <span class="hud-hat">${p.hat}</span>
-        <span>P${p.id + 1}${marker}</span>
-        <span>${hpBar}</span>
-        <span class="hud-score">${p.score}</span>
+        <div style="flex:1;min-width:0;">
+          <div class="hud-name">${displayName}${marker}${teamDot}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.5);display:flex;gap:4px;margin-top:1px;">
+            <span title="Balloons">💣×${p.maxBalloons}</span>
+            <span title="Range">💥${p.balloonRange}</span>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
+          <span class="hud-score">${p.score}</span>
+          <span class="hud-status">${statusIcon}</span>
+        </div>
       </div>`;
     })
     .join("");
@@ -173,17 +278,33 @@ function updateHUD(state: GameState): void {
 
 // ─── Map Selection ────────────────────────────────────────────────────────────
 
+/** Lock or unlock map cards. Guests cannot change the map. */
+function setMapGridLocked(locked: boolean): void {
+  mapGrid.classList.toggle("map-grid-locked", locked);
+  mapGrid.querySelectorAll<HTMLButtonElement>(".map-card").forEach((btn) => {
+    btn.disabled = locked;
+  });
+}
+
 function buildMapGrid(): void {
   mapGrid.innerHTML = "";
   for (const map of MAPS) {
     const card = document.createElement("button");
     card.className = "map-card" + (map.id === selectedMapId ? " selected" : "");
-    card.innerHTML = `<span class="map-emoji">${map.emoji}</span>
-      <span class="map-name">${map.name}</span>
-      <span class="map-desc">${map.desc}</span>`;
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="map-emoji">${map.emoji}</span>
+        <div style="text-align:left;">
+          <div class="map-name">${map.name}</div>
+          <div class="map-desc">${map.desc}</div>
+        </div>
+        ${map.id === selectedMapId ? '<span class="sel-badge">✔ SELECTED</span>' : ''}
+      </div>`;
     card.addEventListener("click", () => {
       selectedMapId = map.id;
       buildMapGrid();
+      // Broadcast map change to all guests if hosting
+      if (peer?.role === "host") peer.broadcast({ type: "map_change", mapId: map.id });
     });
     mapGrid.appendChild(card);
   }
@@ -193,19 +314,41 @@ function buildMapGrid(): void {
 
 function startGame(numOnlinePlayers = 1): void {
   const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-  const numAI = isOnline ? 0 : 7; // solo: 7 AI; online: all humans
+  const numAI = isOnline ? aiSlots.size : 7; // solo: 7 AI; online: only host-added AI slots
   const numHumans = isOnline ? numOnlinePlayers : 1;
-  gameState = createGameState(map, numAI, numHumans);
+
+  // Build player configs — local player gets char customization; all slots get host-assigned teams
+  const playerConfigs: PlayerConfig[] = [];
+  for (let i = 0; i < numHumans + numAI; i++) {
+    const assignedTeam = slotTeams.get(i) ?? 0;
+    if (i === localPlayerIndex) {
+      playerConfigs[i] = {
+        outfit: localCharConfig.outfit,
+        skinTone: localCharConfig.skinTone,
+        team: assignedTeam,
+        name: getPlayerName(),
+      };
+    } else {
+      playerConfigs[i] = { team: assignedTeam };
+    }
+  }
+
+  gameState = createGameState(map, numAI, numHumans, playerConfigs);
   initAI(gameState);
 
+  cancelAnimationFrame(charPreviewAnimId);
+
   lobby.classList.add("hidden");
-  p2pPanel.classList.add("hidden");
   gameWrap.classList.remove("hidden");
   msgOverlay.classList.add("hidden");
 
   cancelAnimationFrame(rafId);
   lastTime = 0;
-  rafId = requestAnimationFrame(gameLoop);
+  // Let the DOM paint so offsetHeight values are correct before scaling
+  requestAnimationFrame(() => {
+    fitArena();
+    rafId = requestAnimationFrame(gameLoop);
+  });
 }
 
 function endGame(): void {
@@ -216,10 +359,20 @@ function endGame(): void {
   peer?.disconnect();
   peer = null;
   remoteInputQueue.length = 0;
-  setNetStatus("idle");
+  remoteDir.clear();
+  connectedPlayers.clear();
+  aiSlots.clear();
+  slotTeams.clear();
+  p2pStartGameBtn.disabled = true;
+  msgOverlay.classList.add("hidden");
   gameWrap.classList.add("hidden");
   lobby.classList.remove("hidden");
+  setMapGridLocked(false);
   buildMapGrid();
+  buildSlotsGrid();
+  renderCharPreview();
+  // Re-create the host room so returning players can share a fresh code
+  initHostRoom();
 }
 
 // ─── Game Loop ────────────────────────────────────────────────────────────────
@@ -263,7 +416,7 @@ function gameLoop(ts: number): void {
 function soloFrame(dt: number): void {
   if (!gameState) return;
   const localPlayer = gameState.players[0];
-  if (localPlayer?.alive) {
+  if (localPlayer?.alive && !localPlayer.trappedInBalloon) {
     setPlayerVelocity(localPlayer, getDirForPlayer(0));
   }
   for (const p of gameState.players) {
@@ -286,20 +439,25 @@ function hostFrame(dt: number): void {
 
   // Apply local P1 input
   const localPlayer = gameState.players[0];
-  if (localPlayer?.alive) setPlayerVelocity(localPlayer, getDirForPlayer(0));
+  if (localPlayer?.alive && !localPlayer.trappedInBalloon) setPlayerVelocity(localPlayer, getDirForPlayer(0));
 
-  // Apply buffered guest inputs
+  // Process buffered guest inputs — update last-known direction per player
   const msgs = remoteInputQueue.splice(0);
   for (const msg of msgs) {
     if (msg.type === "input") {
-      const p = gameState.players[msg.playerId];
-      if (!p || !p.alive) continue;
       if (msg.action === "move") {
-        setPlayerVelocity(p, msg.dir as Direction | null);
+        remoteDir.set(msg.playerId, (msg.dir || null) as Direction | null);
       } else if (msg.action === "balloon") {
-        placeBalloon(gameState, p);
+        const p = gameState.players[msg.playerId];
+        if (p?.alive) placeBalloon(gameState, p);
       }
     }
+  }
+
+  // Re-apply last known velocity every frame for all remote players
+  for (const [playerId, dir] of remoteDir) {
+    const p = gameState.players[playerId];
+    if (p?.alive) setPlayerVelocity(p, dir);
   }
 
   updateGame(gameState, dt);
@@ -308,23 +466,22 @@ function hostFrame(dt: number): void {
   peer.sendStateSync(buildStateSnapshot(gameState));
 }
 
-function guestFrame(dt: number): void {
+function guestFrame(_dt: number): void {
   if (!gameState || !peer) return;
 
   const dir = getDirForPlayer(localPlayerIndex);
   const localPlayer = gameState.players[localPlayerIndex];
-  if (localPlayer?.alive) {
-    setPlayerVelocity(localPlayer, dir);
+  if (localPlayer?.alive && !localPlayer.trappedInBalloon) {
+    // Send input to host every frame; host is authoritative for all physics
     peer.sendToHost({
       type: "input",
       playerId: localPlayerIndex,
       action: "move",
-      dir: dir ?? "none",
+      dir: dir ?? "",
     });
   }
-
-  // Guests do a lightweight local sim for responsiveness
-  updateGame(gameState, dt);
+  // Guest does NOT run updateGame — all physics is authoritative on the host.
+  // State is applied via applyStateSnapshot when state_sync messages arrive.
 }
 
 // ─── State Snapshot ───────────────────────────────────────────────────────────
@@ -347,6 +504,9 @@ function buildStateSnapshot(state: GameState): StateSyncPayload {
       maxBalloons: p.maxBalloons,
       balloonRange: p.balloonRange,
       speed: p.speed,
+      trappedInBalloon: p.trappedInBalloon,
+      trapBalloonId: p.trapBalloonId,
+      trapCountdown: p.trapCountdown,
     })),
     balloons: state.balloons.map((b) => ({
       id: b.id,
@@ -356,6 +516,7 @@ function buildStateSnapshot(state: GameState): StateSyncPayload {
       timer: b.timer,
       range: b.range,
       trapped: b.trapped,
+      trapTimer: b.trapTimer,
     })),
     explosions: state.explosions.map((e) => ({
       row: e.row,
@@ -371,6 +532,7 @@ function buildStateSnapshot(state: GameState): StateSyncPayload {
     grid: state.grid,
     gameOver: state.gameOver,
     winner: state.winner,
+    winnerTeam: state.winnerTeam,
     elapsed: state.elapsed,
   };
 }
@@ -379,15 +541,13 @@ function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
   for (const snap of payload.players) {
     const p = state.players[snap.id];
     if (!p) continue;
-    // Don't overwrite local player's position — let local prediction stand
-    if (snap.id !== localPlayerIndex) {
-      p.row = snap.row;
-      p.col = snap.col;
-      p.px = snap.px;
-      p.py = snap.py;
-      p.vx = snap.vx;
-      p.vy = snap.vy;
-    }
+    // Host is authoritative for all player state including position
+    p.row = snap.row;
+    p.col = snap.col;
+    p.px = snap.px;
+    p.py = snap.py;
+    p.vx = snap.vx;
+    p.vy = snap.vy;
     p.alive = snap.alive;
     p.score = snap.score;
     p.invincible = snap.invincible;
@@ -395,10 +555,13 @@ function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
     p.maxBalloons = snap.maxBalloons;
     p.balloonRange = snap.balloonRange;
     p.speed = snap.speed;
+    p.trappedInBalloon = snap.trappedInBalloon;
+    p.trapBalloonId = snap.trapBalloonId;
+    p.trapCountdown = snap.trapCountdown;
   }
   state.balloons = payload.balloons.map((b) => ({
     ...b,
-    trapTimer: 0,
+    trapTimer: b.trapTimer,
     el: null,
   }));
   state.explosions = payload.explosions;
@@ -411,16 +574,24 @@ function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
     state.grid = payload.grid as import("./game/types").TileType[][];
   state.gameOver = payload.gameOver;
   state.winner = payload.winner;
+  state.winnerTeam = payload.winnerTeam ?? null;
   state.elapsed = payload.elapsed;
 }
 
 // ─── Game Over ────────────────────────────────────────────────────────────────
 
 function showGameOver(state: GameState): void {
+  const TEAM_CLR = ["#ef5350","#42a5f5","#66bb6a","#ffa726"];
+  const TEAM_NM  = ["Red","Blue","Green","Orange"];
   let text: string;
-  if (state.winner !== null) {
+  if (state.winnerTeam !== null && state.winnerTeam > 0) {
+    const tc = TEAM_CLR[state.winnerTeam - 1];
+    const tn = TEAM_NM[state.winnerTeam - 1];
+    text = `<span style="color:${tc}">🏆 ${tn} Team Wins!</span>`;
+  } else if (state.winner !== null) {
     const w = state.players[state.winner];
-    text = `${w?.hat ?? "🎉"} Player ${state.winner + 1} wins!`;
+    const name = w?.name && w.name !== `P${state.winner + 1}` ? w.name : `P${state.winner + 1}`;
+    text = `${w?.hat ?? "🎉"} ${name} wins!`;
   } else {
     text = "🤝 Draw!";
   }
@@ -444,173 +615,398 @@ function setNetStatus(
   s: "idle" | "connecting" | "connected" | "disconnected",
 ): void {
   const labels: Record<string, string> = {
-    idle: "Offline",
-    connecting: "Waiting for players…",
+    idle: "🔴 Not connected",
+    connecting: "🟡 Waiting for players…",
     connected: "🟢 Online",
     disconnected: "🔴 Disconnected",
   };
   netStatus.textContent = labels[s] ?? s;
 }
 
-function setP2pMsg(text: string, kind: "ok" | "err" | "" = ""): void {
-  p2pMsg.textContent = text;
-  p2pMsg.className = "p2p-msg" + (kind ? ` p2p-msg-${kind}` : "");
+function setRoomStatus(text: string, kind: "ok" | "err" | "" = ""): void {
+  roomStatusLine.textContent = text;
+  roomStatusLine.className = "room-status-line" + (kind ? ` room-status-${kind}` : "");
 }
 
-// ─── P2P Panel ────────────────────────────────────────────────────────────────
-
-function showP2pPanel(): void {
-  p2pPanel.classList.remove("hidden");
-  p2pHostStep.style.display = "none";
-  p2pGuestStep.style.display = "none";
-  setP2pMsg("Choose your role to start a multiplayer session.");
+function setJoinMsg(text: string, kind: "ok" | "err" | "" = ""): void {
+  roomJoinMsg.textContent = text;
+  roomJoinMsg.className = "room-join-msg" + (kind ? ` room-join-${kind}` : "");
 }
 
-openP2pBtn.addEventListener("click", showP2pPanel);
-p2pCloseBtn.addEventListener("click", () => {
-  p2pPanel.classList.add("hidden");
+// ─── Slots Grid ───────────────────────────────────────────────────────────────
+
+/** Connected guests: Map of playerIndex → name */
+const connectedPlayers = new Map<number, string>();
+/** Slots that the host has toggled to AI: Set of playerIndex (1-7) */
+const aiSlots = new Set<number>();
+/** Team assignment per slot index (0-7). Host-authoritative. 0 = no team. */
+const slotTeams = new Map<number, number>();
+
+/** Update the char-picker card background to reflect the local player's team. */
+function updateCharPickerTeamBg(): void {
+  const charPicker = document.getElementById("char-picker");
+  if (!charPicker) return;
+  const team = slotTeams.get(localPlayerIndex) ?? 0;
+  if (team > 0) {
+    const c = TEAM_COLORS[team - 1];
+    charPicker.style.borderColor = c;
+    charPicker.style.background = `${c}22`;
+    charPicker.style.boxShadow = `0 0 18px ${c}44`;
+  } else {
+    charPicker.style.borderColor = "";
+    charPicker.style.background = "";
+    charPicker.style.boxShadow = "";
+  }
+}
+
+function buildSlotsGrid(): void {
+  slotsGrid.innerHTML = "";
+  const MAX_SLOTS = 8;
+  const isHost = !peer || peer.role === "host";
+
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    const slot = document.createElement("div");
+    const team = slotTeams.get(i) ?? 0;
+    const teamColor = team > 0 ? TEAM_COLORS[team - 1] : null;
+    const isMe = i === localPlayerIndex;
+
+    // Determine slot name: guests read from connectedPlayers (populated from lobby_state)
+    // Slot 0 name: host always knows their own name; guests receive it via lobby_state
+    let slotName = "";
+    let slotKind: "self" | "host" | "ready" | "ai" | "empty" = "empty";
+
+    if (i === 0) {
+      slotName = isHost ? getPlayerName() : (connectedPlayers.get(0) ?? "Host");
+      slotKind = isMe ? "self" : "host";
+    } else if (connectedPlayers.has(i)) {
+      slotName = connectedPlayers.get(i)!;
+      slotKind = isMe ? "self" : "ready";
+    } else if (aiSlots.has(i)) {
+      slotName = `CPU ${i}`;
+      slotKind = "ai";
+    } else {
+      slotKind = "empty";
+    }
+
+    // Base class
+    const classMap: Record<string, string> = {
+      self: "slot-self", host: "slot-ready", ready: "slot-ready", ai: "slot-ai", empty: "slot-empty",
+    };
+    slot.className = `player-slot ${classMap[slotKind]}`;
+
+    // Team color tint via border + shadow
+    if (teamColor) {
+      slot.style.borderColor = teamColor;
+      slot.style.boxShadow = `0 0 10px ${teamColor}55`;
+      slot.style.background = `${teamColor}22`;
+    }
+
+    // Build inner HTML
+    const icon = slotKind === "self" ? "🎮" : slotKind === "ai" ? "🤖" : slotKind === "empty" ? "➕" : "👤";
+    const tag = isMe
+      ? `<span class="slot-tag">You</span>`
+      : slotKind === "ready" || slotKind === "host"
+        ? `<span class="slot-tag">READY</span>`
+        : slotKind === "ai"
+          ? `<span class="slot-tag">AI</span>`
+          : "";
+    const teamBadge = teamColor
+      ? `<span class="slot-team-dot" style="background:${teamColor}"></span>`
+      : "";
+
+    slot.innerHTML = `<span class="slot-icon">${icon}</span><span class="slot-name">${slotName}${teamBadge}</span>${tag}`;
+
+    // Host: kick button on human slots
+    if (isHost && slotKind === "ready" && i !== 0) {
+      const kickBtn = document.createElement("button");
+      kickBtn.className = "slot-kick-btn";
+      kickBtn.title = "Kick player";
+      kickBtn.textContent = "✕";
+      kickBtn.addEventListener("click", (e) => { e.stopPropagation(); kickPlayer(i); });
+      slot.appendChild(kickBtn);
+    }
+
+    // Host: left-click empty→AI, click AI→empty
+    if (isHost && slotKind === "empty") {
+      slot.title = "Click to add AI";
+      slot.style.cursor = "pointer";
+      slot.addEventListener("click", () => { aiSlots.add(i); buildSlotsGrid(); broadcastLobbyState(); });
+    } else if (isHost && slotKind === "ai") {
+      slot.title = "Click to remove AI";
+      slot.style.cursor = "pointer";
+      slot.addEventListener("click", () => { aiSlots.delete(i); buildSlotsGrid(); broadcastLobbyState(); });
+    }
+
+    // Host: right-click any non-empty slot → cycle team
+    if (isHost && slotKind !== "empty") {
+      slot.title = (slot.title ? slot.title + " · " : "") + "Right-click to change team";
+      slot.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const cur = slotTeams.get(i) ?? 0;
+        slotTeams.set(i, (cur + 1) % (TEAM_COLORS.length + 1));
+        // Update local player's team if host right-clicks their own slot
+        if (i === 0) {
+          localCharConfig.team = slotTeams.get(0) ?? 0;
+          saveCharConfig();
+          updateCharPickerTeamBg();
+        }
+        buildSlotsGrid();
+        broadcastLobbyState();
+      });
+    }
+
+    // Update char picker background if this is the local player's slot
+    if (isMe && teamColor) updateCharPickerTeamBg();
+
+    slotsGrid.appendChild(slot);
+  }
+
+  // Also refresh char picker bg for the local player
+  updateCharPickerTeamBg();
+}
+
+// ─── Host Room (auto-created on page load) ────────────────────────────────────
+
+/** Broadcast current lobby state (slots + map) to all guests. Host only. */
+function broadcastLobbyState(): void {
+  if (!peer || peer.role !== "host") return;
+  const slots: LobbySlot[] = [];
+  for (let i = 0; i < 8; i++) {
+    const team = slotTeams.get(i) ?? 0;
+    if (i === 0) {
+      slots.push({ index: 0, name: getPlayerName(), kind: "host", team });
+    } else if (connectedPlayers.has(i)) {
+      slots.push({ index: i, name: connectedPlayers.get(i)!, kind: "human", team });
+    } else if (aiSlots.has(i)) {
+      slots.push({ index: i, name: `CPU ${i}`, kind: "ai", team });
+    } else {
+      slots.push({ index: i, name: "", kind: "empty", team });
+    }
+  }
+  peer.broadcast({ type: "lobby_state", slots, mapId: selectedMapId });
+}
+
+/** Host kicks a guest at the given player index. */
+function kickPlayer(playerIndex: number): void {
+  if (!peer || peer.role !== "host") return;
+  // RoomPeer exposes sendToPlayer for targeted messages
+  peer.sendToPlayer(playerIndex, { type: "kick" });
+  connectedPlayers.delete(playerIndex);
+  // Re-number remaining guests so the slot stays occupied
+  buildSlotsGrid();
+  broadcastLobbyState();
+  if (connectedPlayers.size === 0) p2pStartGameBtn.disabled = true;
+}
+
+async function initHostRoom(): Promise<void> {
   if (peer) {
     peer.disconnect();
     peer = null;
   }
   isOnline = false;
-  setNetStatus("idle");
-});
-
-// ── Host flow ─────────────────────────────────────────────────────────────────
-
-p2pHostBtn.addEventListener("click", async () => {
-  if (peer) {
-    peer.disconnect();
-    peer = null;
-  }
-  isOnline = true;
   localPlayerIndex = 0;
+  connectedPlayers.clear();
+  aiSlots.clear();
+  slotTeams.clear();
+  setRoomStatus("Creating room…");
 
   peer = new RoomPeer({
-    onGuestJoined(count) {
-      p2pGuestCount.textContent = `${count} guest${count !== 1 ? "s" : ""} connected`;
-      (p2pStartGameBtn as HTMLButtonElement).disabled = false;
+    onGuestJoined(count, playerIndex) {
+      setRoomStatus(`${count} guest${count !== 1 ? "s" : ""} connected — share the code!`, "ok");
+      p2pStartGameBtn.disabled = false;
+      isOnline = true;
+      // Name will arrive via "hello"; placeholder until then
+      if (!connectedPlayers.has(playerIndex)) connectedPlayers.set(playerIndex, `P${playerIndex + 1}`);
+      buildSlotsGrid();
+      broadcastLobbyState();
     },
-    onConnectedToHost() {
-      /* unused for host */
-    },
+    onConnectedToHost() { /* host doesn't use this */ },
     onDisconnected() {
       setNetStatus("disconnected");
-      setP2pMsg("A guest disconnected.", "err");
+      // Sync connected players from the authoritative peer connection map
+      const active = peer?.activePlayerIndices ?? new Set<number>();
+      for (const idx of [...connectedPlayers.keys()]) {
+        if (!active.has(idx)) connectedPlayers.delete(idx);
+      }
+      const count = connectedPlayers.size;
+      setRoomStatus(count > 0
+        ? `${count} guest${count !== 1 ? "s" : ""} connected — share the code!`
+        : "A guest disconnected.", count > 0 ? "ok" : "err");
+      buildSlotsGrid();
+      broadcastLobbyState();
+      if (connectedPlayers.size === 0) p2pStartGameBtn.disabled = true;
     },
     onMessage(msg) {
+      if (msg.type === "hello") {
+        // Guest introduced themselves with a name
+        connectedPlayers.set(msg.playerIndex, msg.name || `P${msg.playerIndex + 1}`);
+        buildSlotsGrid();
+        broadcastLobbyState();
+        return;
+      }
       if (msg.type === "input") remoteInputQueue.push(msg);
+      if (msg.type === "state_sync" && gameState) {
+        applyStateSnapshot(gameState, msg.payload);
+      }
     },
-    onStatusChange(s) {
-      setNetStatus(s);
-    },
-    onError(msg) {
-      setP2pMsg(msg, "err");
-    },
+    onStatusChange(s) { setNetStatus(s); },
+    onError(msg) { setRoomStatus(msg, "err"); },
   });
-
-  p2pHostStep.style.display = "block";
-  p2pGuestStep.style.display = "none";
-  p2pRoomCode.textContent = "…";
-  setP2pMsg("Creating room…");
 
   try {
     const code = await peer.createRoom();
-    p2pRoomCode.textContent = code;
-    setP2pMsg("Share this code with friends. Up to 7 guests can join.", "ok");
+    lobbyRoomCode.textContent = code;
+    setRoomStatus("Share this code with friends — up to 7 can join.");
   } catch (err) {
-    setP2pMsg(String(err instanceof Error ? err.message : err), "err");
+    lobbyRoomCode.textContent = "ERR";
+    setRoomStatus(String(err instanceof Error ? err.message : err), "err");
     peer = null;
-    isOnline = false;
+  }
+}
+
+// Copy room code to clipboard
+roomCopyBtn.addEventListener("click", () => {
+  const code = lobbyRoomCode.textContent ?? "";
+  if (code && code !== "……" && code !== "ERR") {
+    navigator.clipboard.writeText(code).then(() => {
+      roomCopyBtn.textContent = "✅";
+      setTimeout(() => (roomCopyBtn.textContent = "📋"), 1500);
+    });
   }
 });
 
+// Refresh = create a new room
+roomRefreshBtn.addEventListener("click", () => {
+  p2pStartGameBtn.disabled = true;
+  connectedPlayers.clear();
+  buildSlotsGrid();
+  initHostRoom();
+});
+
+// Start Online game (host only)
 p2pStartGameBtn.addEventListener("click", () => {
   if (!peer || peer.role !== "host") return;
   const total = peer.guestCount + 1;
   const map = MAPS.find((m) => m.id === selectedMapId) ?? MAPS[0];
-  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0 });
+  peer.broadcast({ type: "start", mapId: map.id, seed: 0, playerIndex: 0, playerCount: total });
   startGame(total);
 });
 
-// ── Guest flow ────────────────────────────────────────────────────────────────
+// ─── Join a Room ──────────────────────────────────────────────────────────────
 
-p2pGuestBtn.addEventListener("click", () => {
-  p2pGuestStep.style.display = "block";
-  p2pHostStep.style.display = "none";
-  setP2pMsg("Type the host's room code and click Join.");
-});
-
-p2pJoinBtn.addEventListener("click", joinAsGuest);
-p2pJoinInput.addEventListener("keydown", (e) => {
+roomJoinBtn.addEventListener("click", joinAsGuest);
+roomJoinInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") joinAsGuest();
 });
 
 async function joinAsGuest(): Promise<void> {
-  const code = p2pJoinInput.value.trim().toUpperCase();
-  if (!code) {
-    setP2pMsg("Enter a room code.", "err");
-    return;
-  }
-  if (peer) {
-    peer.disconnect();
-    peer = null;
-  }
+  const code = roomJoinInput.value.trim().toUpperCase();
+  if (!code) { setJoinMsg("Enter a room code.", "err"); return; }
+
+  // Destroy the host room we auto-created
+  if (peer) { peer.disconnect(); peer = null; }
 
   isOnline = true;
-  p2pJoinBtn.disabled = true;
-  setP2pMsg("Connecting…");
+  roomJoinBtn.disabled = true;
+  setJoinMsg("Connecting…");
 
   peer = new RoomPeer({
-    onGuestJoined() {
-      /* unused for guest */
-    },
+    onGuestJoined() { /* guest doesn't use this */ },
     onConnectedToHost(playerIndex) {
       localPlayerIndex = playerIndex;
-      setP2pMsg(
-        `Connected as Player ${playerIndex + 1}. Waiting for host to start…`,
-        "ok",
-      );
+      setJoinMsg(`Connected as P${playerIndex + 1} — waiting for host to start…`, "ok");
       setNetStatus("connected");
+      lobbyRoomCode.textContent = code;
+      setRoomStatus(`Joined room ${code} as P${playerIndex + 1}`, "ok");
+      p2pStartGameBtn.disabled = true; // only host can start
+
+      // Introduce ourselves to the host
+      peer?.sendToHost({ type: "hello", name: getPlayerName(), playerIndex });
+
+      // Lock map selection — guest cannot change map
+      setMapGridLocked(true);
     },
     onDisconnected() {
       setNetStatus("disconnected");
-      setP2pMsg("Disconnected from host.", "err");
+      setJoinMsg("Disconnected from host.", "err");
+      roomJoinBtn.disabled = false;
+      setMapGridLocked(false);
+      connectedPlayers.clear();
+      buildSlotsGrid();
     },
     onMessage(msg) {
+      if (msg.type === "kick") {
+        setJoinMsg("You were kicked from the room.", "err");
+        isOnline = false;
+        peer?.disconnect();
+        peer = null;
+        roomJoinBtn.disabled = false;
+        setMapGridLocked(false);
+        connectedPlayers.clear();
+        buildSlotsGrid();
+        initHostRoom();
+        return;
+      }
+      if (msg.type === "lobby_state") {
+        // Update slots from host's authoritative lobby state
+        connectedPlayers.clear();
+        aiSlots.clear();
+        slotTeams.clear();
+        for (const s of msg.slots) {
+          if (s.kind === "host") connectedPlayers.set(s.index, s.name);
+          if (s.kind === "human") connectedPlayers.set(s.index, s.name);
+          if (s.kind === "ai") aiSlots.add(s.index);
+          if (s.team > 0) slotTeams.set(s.index, s.team);
+        }
+        buildSlotsGrid();
+        updateCharPickerTeamBg();
+        // Update map selection to match host
+        if (msg.mapId && msg.mapId !== selectedMapId) {
+          selectedMapId = msg.mapId;
+          buildMapGrid();
+        }
+        return;
+      }
+      if (msg.type === "map_change") {
+        selectedMapId = msg.mapId;
+        buildMapGrid();
+        return;
+      }
       if (!gameState) {
-        // Pre-game: wait for "start" broadcast from host
         if (msg.type === "start" && msg.mapId) {
           selectedMapId = msg.mapId;
-          startGame(localPlayerIndex + 1);
+          const total = msg.playerCount ?? localPlayerIndex + 1;
+          setMapGridLocked(false);
+          startGame(total);
         }
       } else {
-        // In-game: apply authoritative state snapshots
         if (msg.type === "state_sync") {
           applyStateSnapshot(gameState, msg.payload);
         }
       }
     },
-    onStatusChange(s) {
-      setNetStatus(s);
-    },
+    onStatusChange(s) { setNetStatus(s); },
     onError(msg) {
-      setP2pMsg(msg, "err");
-      p2pJoinBtn.disabled = false;
+      setJoinMsg(msg, "err");
+      roomJoinBtn.disabled = false;
       isOnline = false;
       peer = null;
+      setMapGridLocked(false);
+      // Re-create host room after failed join
+      initHostRoom();
     },
   });
 
   try {
     await peer.joinRoom(code);
-    p2pJoinBtn.disabled = false;
+    roomJoinBtn.disabled = false;
   } catch (err) {
-    setP2pMsg(String(err instanceof Error ? err.message : err), "err");
-    p2pJoinBtn.disabled = false;
+    setJoinMsg(String(err instanceof Error ? err.message : err), "err");
+    roomJoinBtn.disabled = false;
     isOnline = false;
     peer = null;
+    setMapGridLocked(false);
+    initHostRoom();
   }
 }
 
@@ -631,10 +1027,82 @@ let debugOn = false;
 debugToggle.addEventListener("click", () => {
   debugOn = !debugOn;
   togglePill.classList.toggle("on", debugOn);
+  debugCanvas.classList.toggle("vis", debugOn);
+  if (!debugOn) {
+    const ctx = debugCanvas.getContext("2d")!;
+    ctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+  }
   if (gameState) gameState.showDebug = debugOn;
+});
+
+// ─── Player Name ──────────────────────────────────────────────────────────────
+
+const NAME_KEY = "crazarc_player_name";
+
+const RANDOM_NAMES = [
+  "BombKing", "PixelPete", "BlastQueen", "NeonNinja", "FuseWizard",
+  "TurboToad", "GlitchGuru", "ChaosClown", "MegaMuffin", "ZapZebra",
+  "RocketRex", "BubbleBob", "CrunchBear", "StormRider", "SparkPlug",
+  "WarpWalrus", "DoomDuck", "BounceBoss", "VortexVic", "PanicPanda",
+];
+
+function randomName(): string {
+  return RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)];
+}
+
+const nameInput = document.getElementById("name-input") as HTMLInputElement;
+const nameRandomBtn = document.getElementById("name-random-btn") as HTMLButtonElement;
+
+function loadName(): string {
+  return localStorage.getItem(NAME_KEY) || randomName();
+}
+
+function saveName(name: string): void {
+  localStorage.setItem(NAME_KEY, name.trim() || randomName());
+}
+
+nameInput.value = loadName();
+nameInput.addEventListener("change", () => saveName(nameInput.value));
+nameInput.addEventListener("blur", () => {
+  if (!nameInput.value.trim()) nameInput.value = randomName();
+  saveName(nameInput.value);
+});
+nameRandomBtn.addEventListener("click", () => {
+  nameInput.value = randomName();
+  saveName(nameInput.value);
+});
+
+export function getPlayerName(): string {
+  return nameInput.value.trim() || loadName();
+}
+
+// ─── Arena Scale-to-Fit ───────────────────────────────────────────────────────
+
+function fitArena(): void {
+  const gameBody = document.getElementById("game-body") as HTMLElement | null;
+  const sidebar  = document.getElementById("sidebar")   as HTMLElement | null;
+  const topbar   = document.getElementById("game-topbar") as HTMLElement | null;
+  const tip      = document.getElementById("tip")         as HTMLElement | null;
+
+  const totalW   = gameBody?.offsetWidth  ?? window.innerWidth;
+  const sidebarW = (sidebar?.offsetWidth  ?? 0) + 10; // +gap
+  const topH     = (topbar?.offsetHeight  ?? 0) + 6;
+  const tipH     = (tip?.offsetHeight     ?? 0) + 5;
+
+  const availW = Math.max(totalW - sidebarW - 8, 100);
+  const availH = Math.max(window.innerHeight - topH - tipH - 16, 100);
+  resizeRenderer(availW, availH);
+}
+
+window.addEventListener("resize", () => {
+  if (!gameWrap.classList.contains("hidden")) fitArena();
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 initRenderer(bgCanvas, spriteCanvas, debugCanvas);
 buildMapGrid();
+loadCharConfig();
+buildCharPicker();
+buildSlotsGrid();
+initHostRoom();

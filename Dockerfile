@@ -1,36 +1,39 @@
 # ── Dev stage ────────────────────────────────────────────────────────────────
-# Runs `vite --host` so the dev server is reachable from outside the container.
-# Mount the project root as a volume so hot-reload works on every file save.
+# Runs the Vite dev server inside Docker with full HMR / hot-reload support.
+# The server binds to 0.0.0.0:5173 (configured in vite.config.ts) so it is
+# reachable from your host browser at http://localhost:5173.
 #
-# Usage:
+# Quick start:
+#   docker compose up          – start (or restart) the dev server
+#   docker compose up --build  – rebuild the image after changing package.json
+#
+# Manual usage (without Compose):
 #   docker build -t aca-game-dev .
-#   docker run --rm -it -p 5173:5173 -v $(pwd):/app aca-game-dev
-#
-# Or just:
-#   docker compose up
+#   docker run --rm -it -p 5173:5173 -v "$(pwd)":/app aca-game-dev
 
 FROM node:22-bullseye-slim
 
 # ── System deps ───────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  git curl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+      git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # ── Install dependencies ──────────────────────────────────────────────────────
-# Copy manifests first so Docker can cache this layer between rebuilds.
+# Copy manifests first so Docker can cache this layer between code-only rebuilds.
 COPY package.json package-lock.json* ./
-RUN npm install
+# `npm ci` is faster and stricter than `npm install` — it respects the lockfile exactly.
+RUN npm ci
 
 # ── Copy source ───────────────────────────────────────────────────────────────
-# When developing with -v $(pwd):/app this layer is overwritten by the mount,
-# but it lets the image work standalone (e.g. CI preview) without a volume.
+# When developing with -v $(pwd):/app the bind-mount overwrites this layer,
+# giving you live HMR without rebuilding the image on every source change.
+# The COPY is kept so the image also works standalone (e.g. CI preview).
 COPY . .
 
-# Vite dev server port
+# Vite dev server port (matches server.port in vite.config.ts)
 EXPOSE 5173
 
-# --host   → bind to 0.0.0.0 so the port is reachable from the host / WSL2
-# --port   → explicit so it never auto-increments to an unexpected port
-CMD ["npx", "vite", "--host", "0.0.0.0", "--port", "5173"]
+# Host / port / polling are all configured in vite.config.ts — no flags needed here.
+CMD ["npx", "vite"]

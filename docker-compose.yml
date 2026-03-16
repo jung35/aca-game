@@ -2,23 +2,32 @@
 # Run the Vite dev server inside Docker with full hot-reload support.
 #
 # Usage:
-#   docker compose up          (or docker-compose up on older Docker)
-#   docker compose up --build  (rebuild after changing package.json)
+#   docker compose up          – start the dev server (http://localhost:5173)
+#   docker compose up --build  – rebuild the image after changing package.json
+#   docker compose down        – stop and remove the container
 
 services:
   dev:
     build: .
     container_name: aca-game-dev
     ports:
+      # http://localhost:5173 in your host browser → Vite inside the container
       - "5173:5173"
     volumes:
-      # Mount the whole project so Vite's HMR watches real source files.
+      # Bind-mount the project root so every source file change triggers HMR.
       - .:/app
-      # Keep node_modules inside the container — don't overwrite with the
-      # host's Windows node_modules (wrong platform binaries).
+      # Isolate node_modules inside the container so platform-specific binaries
+      # (e.g. esbuild) built during `npm ci` are never overwritten by the host.
       - /app/node_modules
     environment:
       - NODE_ENV=development
-    # Vite needs inotify to watch files; this keeps the container alive.
+      # Tell Chokidar (used by Vite's watcher) to fall back to polling.
+      # Required when the host filesystem doesn't forward inotify events into
+      # the container (common on Docker Desktop for Mac/Windows and some WSL2 setups).
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=300
+    # Keep STDIN/TTY open so Vite's interactive CLI (q to quit, r to restart) works.
     stdin_open: true
     tty: true
+    # Restart automatically if the container crashes (e.g. after a docker daemon restart).
+    restart: unless-stopped
