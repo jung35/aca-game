@@ -1,5 +1,5 @@
 import type { GameState } from "../types";
-import { ARENA_W, ARENA_H, TEAM_COLORS, OUTFIT_STYLES, TEAM_OUTFIT } from "../constants";
+import { ARENA_W, ARENA_H, TEAM_COLORS, OUTFIT_STYLES, TEAM_OUTFIT, PLAYER_HALF } from "../constants";
 import { cellToPixel } from "../physics/helpers";
 import {
   buildCharacterImages,
@@ -7,9 +7,11 @@ import {
   clearCharImageCache,
 } from "./characterSvg";
 import type { CharColors, CharacterImages } from "./characterSvg";
+import { getBalloonCanvas, clearBalloonCache } from "./balloonSvg";
+import type { BalloonColors } from "./balloonSvg";
 
 // ── Balloon colours per owner index ─────────────────────────────────────────
-const BALLOON_COLORS = [
+const BALLOON_COLORS: BalloonColors[] = [
   { body: "#ef5350", shadow: "#b71c1c", shine: "#ff8a80" },
   { body: "#42a5f5", shadow: "#0d47a1", shine: "#90caf9" },
   { body: "#66bb6a", shadow: "#1b5e20", shine: "#a5d6a7" },
@@ -49,7 +51,7 @@ function resolveColors(p: GameState["players"][0]): CharColors {
 }
 
 /** Get balloon color — uses team color if on a team. */
-function getBalloonColor(state: GameState, ownerId: number) {
+function getBalloonColor(state: GameState, ownerId: number): BalloonColors {
   const owner = state.players.find(p => p.id === ownerId);
   if (owner && owner.team > 0) {
     const tc = TEAM_COLORS[(owner.team - 1) % TEAM_COLORS.length];
@@ -82,6 +84,7 @@ function getPlayerImages(p: GameState["players"][0]): CharacterImages {
 export function clearSpriteCache(): void {
   _playerImages.clear();
   clearCharImageCache();
+  clearBalloonCache();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,71 +96,23 @@ function drawBalloon(
   state: GameState,
   ownerId: number,
   trapped: boolean,
-  timer: number,
-  trapTimer: number,
+  _timer: number,
+  _trapTimer: number,
   now: number,
 ): void {
-  const pulse = 1 + 0.05 * Math.sin(now * 0.007);
+  const pulse = 1 + 0.04 * Math.sin(now * 0.007);
   const col = trapped
     ? { body: "#ffd600", shadow: "#e65100", shine: "#fff59d" }
     : getBalloonColor(state, ownerId);
 
+  const oc = getBalloonCanvas(col);
+
   ctx.save();
   ctx.scale(pulse, pulse);
 
-  // Drop shadow
-  ctx.beginPath();
-  ctx.ellipse(2, 18, 10, 3.5, 0, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(0,0,0,0.28)";
-  ctx.fill();
-
-  // Body
-  const bodyGrad = ctx.createRadialGradient(-5, -10, 2, 0, -2, 16);
-  bodyGrad.addColorStop(0, col.shine);
-  bodyGrad.addColorStop(0.45, col.body);
-  bodyGrad.addColorStop(1, col.shadow);
-  ctx.beginPath();
-  ctx.ellipse(0, -3, 13, 16, 0, 0, Math.PI * 2);
-  ctx.fillStyle = bodyGrad;
-  ctx.fill();
-  ctx.strokeStyle = col.shadow;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // Shine blobs
-  ctx.beginPath();
-  ctx.ellipse(-4, -11, 4, 2.5, -0.5, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(255,255,255,0.7)";
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(3, -14, 1.5, 1, 0.3, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(255,255,255,0.45)";
-  ctx.fill();
-
-  // Knot
-  ctx.beginPath();
-  ctx.ellipse(0, 13, 2.5, 2, 0, 0, Math.PI * 2);
-  ctx.fillStyle = col.shadow;
-  ctx.fill();
-
-  // String
-  ctx.beginPath();
-  ctx.moveTo(0, 15);
-  ctx.bezierCurveTo(3, 20, -3, 24, 1, 28);
-  ctx.strokeStyle = "rgba(0,0,0,0.35)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // Timer text
-  const secs = trapped ? (trapTimer + timer).toFixed(1) : timer.toFixed(1);
-  ctx.font = "bold 9px Nunito, sans-serif";
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.strokeStyle = "rgba(0,0,0,0.5)";
-  ctx.lineWidth = 2.5;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.strokeText(secs, 0, -3);
-  ctx.fillText(secs, 0, -3);
+  // Draw cached balloon — knot sits at (0, 0), body extends upward
+  // Logical canvas is 22×30; knot origin at (11, 22) inside it
+  ctx.drawImage(oc, -11, -22, 22, 30);
 
   ctx.restore();
 }
@@ -291,16 +246,6 @@ function drawTrappedBubble(
   ctx.stroke();
 
   // Countdown label above the bubble
-  const secs = countdown.toFixed(1);
-  ctx.font = "bold 6px Nunito, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.strokeStyle = "rgba(0,0,0,0.7)";
-  ctx.lineWidth = 2;
-  ctx.strokeText(secs, 0, -bubbleR - 2);
-  ctx.fillStyle = countdown < 1.5 ? "#ff4444" : "#fff";
-  ctx.fillText(secs, 0, -bubbleR - 2);
-
   ctx.restore();
 }
 
@@ -325,7 +270,8 @@ export function drawSprites(
     if (trapBalloonIds.has(b.id)) continue; // trap-player balloons rendered with players
     const { px, py } = cellToPixel(b.row, b.col);
     ctx.save();
-    ctx.translate(px, py - 4);
+    // Translate so the balloon knot sits just below centre; body floats above
+    ctx.translate(px, py + 6);
     drawBalloon(ctx, state, b.ownerId, b.trapped, b.timer, b.trapTimer, now);
     ctx.restore();
   }
@@ -336,8 +282,9 @@ export function drawSprites(
     if (p.invincible && Math.floor(now * 0.008) % 2 === 0) continue;
 
     ctx.save();
-    // foot-centre sits 3px above the logical py (cell centre)
-    ctx.translate(p.px, p.py + 3);
+    // Feet sit at py + PLAYER_HALF so the AABB (py ± PLAYER_HALF) aligns
+    // with the lower body of the sprite, not the empty space below it.
+    ctx.translate(p.px, p.py + PLAYER_HALF);
 
     if (p.trappedInBalloon) {
       drawTrappedBubble(ctx, p, now);

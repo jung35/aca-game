@@ -20,7 +20,13 @@ export type NetMessage =
   /** Host → one guest: you are being kicked. */
   | { type: "kick" }
   /** Host → all guests: host changed the map. */
-  | { type: "map_change"; mapId: string };
+  | { type: "map_change"; mapId: string }
+  /** Any → host: post-game vote (replay or leave). */
+  | { type: "game_over_vote"; playerIndex: number; action: "replay" | "leave" }
+  /** Host → all guests: live vote status update (before resolution). */
+  | { type: "vote_status"; statusText: string }
+  /** Host → all guests: all players voted; resolved action. */
+  | { type: "game_over_resolved"; action: "replay" | "leave"; replayCount: number; totalCount: number };
 
 export interface LobbySlot {
   index: number;

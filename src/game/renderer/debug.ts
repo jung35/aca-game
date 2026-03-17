@@ -24,6 +24,36 @@ export function drawDebug(
     ctx.stroke();
   }
 
+  // Balloon blast radii
+  for (const b of state.balloons) {
+    const { px: bpx, py: bpy } = cellToPixel(b.row, b.col);
+
+    // Centre cell
+    ctx.fillStyle = "rgba(255, 80, 0, 0.35)";
+    ctx.fillRect(b.col * CELL_W, b.row * CELL_H, CELL_W, CELL_H);
+
+    // Four arms — stop at solid walls and destructible blocks (matching isSafe logic)
+    const deltas: Array<[number, number]> = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (const [dr, dc] of deltas) {
+      for (let step = 1; step <= b.range; step++) {
+        const nr = b.row + dr * step;
+        const nc = b.col + dc * step;
+        const tile = state.grid[nr]?.[nc];
+        if (tile === 1) break; // solid wall — arm stops before this cell
+        ctx.fillStyle = "rgba(255, 80, 0, 0.25)";
+        ctx.fillRect(nc * CELL_W, nr * CELL_H, CELL_W, CELL_H);
+        if (tile === 2) break; // destructible block — arm stops after highlighting it
+      }
+    }
+
+    // Timer label
+    ctx.fillStyle = "#ff5000";
+    ctx.font = "bold 9px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(`${b.timer.toFixed(1)}s`, bpx, bpy + 4);
+    ctx.textAlign = "left";
+  }
+
   // Player hitboxes
   for (const p of state.players) {
     if (!p.alive) continue;

@@ -21,6 +21,8 @@ import {
   drawDebug,
 } from "./game/renderer/index";
 import { drawPreviewCharacter } from "./game/renderer/sprites";
+import { getPowerUpCanvas } from "./game/renderer/powerupSvg";
+import type { PowerUpKind } from "./game/types";
 import {
   updateGame,
   setPlayerVelocity,
@@ -481,6 +483,20 @@ function hostFrame(dt: number): void {
     if (p?.alive) setPlayerVelocity(p, dir);
   }
 
+  // Run AI (host is authoritative for all physics including AI)
+  for (const p of gameState.players) {
+    if (p.isAI) {
+      const state = gameState;
+      updateAI(
+        state,
+        p,
+        dt,
+        (ai) => placeBalloon(state, ai),
+        (ai, dir) => setPlayerVelocity(ai, dir),
+      );
+    }
+  }
+
   updateGame(gameState, dt);
 
   // Snapshot to guests at ~20Hz (every frame is fine; PeerJS will coalesce)
@@ -607,6 +623,9 @@ function applyStateSnapshot(state: GameState, payload: StateSyncPayload): void {
 
 // ─── Game Over ────────────────────────────────────────────────────────────────
 
+/** Tracks post-game votes: playerIndex → "replay" | "leave". Host-side only. */
+const gameOverVotes = new Map<number, "replay" | "leave">();
+
 function showGameOver(state: GameState): void {
   const TEAM_CLR = ["#ef5350","#42a5f5","#66bb6a","#ffa726"];
   const TEAM_NM  = ["Red","Blue","Green","Orange"];
@@ -622,18 +641,102 @@ function showGameOver(state: GameState): void {
   } else {
     text = "🤝 Draw!";
   }
-  msgBox.innerHTML = `<div class="msg-title">${text}</div>
-    <button id="replay-btn" class="msg-btn">▶ Play Again</button>
-    <button id="lobby-btn" class="msg-btn">🏠 Lobby</button>`;
-  msgOverlay.classList.remove("hidden");
-  (document.getElementById("replay-btn") as HTMLButtonElement).addEventListener(
-    "click",
-    () => startGame(isOnline ? (gameState?.players.length ?? 1) : 1),
-  );
-  (document.getElementById("lobby-btn") as HTMLButtonElement).addEventListener(
-    "click",
-    endGame,
-  );
+
+  if (isOnline) {
+    // Online: show vote buttons; host waits for all players; guests send vote to host
+    const humanCount = isOnline ? (peer?.guestCount ?? 0) + 1 : 1;
+    gameOverVotes.clear();
+
+    msgBox.innerHTML = `<div class="msg-title">${text}</div>
+      <div id="vote-status" style="font-size:13px;color:rgba(255,255,255,0.6);margin-bottom:8px;min-height:18px;"></div>
+      <button id="replay-btn" class="msg-btn">▶ Play Again</button>
+      <button id="lobby-btn" class="msg-btn">🏠 Leave</button>`;
+    msgOverlay.classList.remove("hidden");
+
+    const voteStatusEl = document.getElementById("vote-status") as HTMLElement;
+
+    function updateVoteStatus(): void {
+      const total = humanCount;
+      const voted = gameOverVotes.size;
+      const names: string[] = [];
+      for (const [idx, vote] of gameOverVotes) {
+        const p = state.players[idx];
+        const nm = p?.name && p.name !== `P${idx + 1}` ? p.name : `P${idx + 1}`;
+        names.push(`${nm}: ${vote === "replay" ? "▶" : "🏠"}`);
+      }
+      const statusText = `${voted}/${total} voted${names.length ? " — " + names.join(", ") : ""}`;
+      voteStatusEl.textContent = statusText;
+      // Broadcast live status to all guests so they see it too
+      peer?.broadcast({ type: "vote_status", statusText });
+    }
+
+    function castVote(action: "replay" | "leave"): void {
+      // Hide buttons after voting
+      const replayBtn = document.getElementById("replay-btn") as HTMLButtonElement | null;
+      const lobbyBtn  = document.getElementById("lobby-btn")  as HTMLButtonElement | null;
+      if (replayBtn) replayBtn.style.display = "none";
+      if (lobbyBtn)  lobbyBtn.style.display  = "none";
+
+      if (peer?.role === "guest") {
+        peer.sendToHost({ type: "game_over_vote", playerIndex: localPlayerIndex, action });
+        voteStatusEl.textContent = `You voted ${action === "replay" ? "▶ Play Again" : "🏠 Leave"} — waiting for others…`;
+      } else {
+        // Host registers own vote
+        gameOverVotes.set(localPlayerIndex, action);
+        updateVoteStatus();
+        checkAllVoted(humanCount);
+      }
+    }
+
+    (document.getElementById("replay-btn") as HTMLButtonElement).addEventListener("click", () => castVote("replay"));
+    (document.getElementById("lobby-btn") as HTMLButtonElement).addEventListener("click", () => castVote("leave"));
+
+    // Expose helpers so onMessage can call them
+    (window as unknown as Record<string, unknown>).__voteHelpers = { updateVoteStatus, checkAllVoted: (n: number) => checkAllVoted(n), humanCount };
+
+  } else {
+    // Solo: show buttons immediately
+    msgBox.innerHTML = `<div class="msg-title">${text}</div>
+      <button id="replay-btn" class="msg-btn">▶ Play Again</button>
+      <button id="lobby-btn" class="msg-btn">🏠 Leave Lobby</button>`;
+    msgOverlay.classList.remove("hidden");
+    (document.getElementById("replay-btn") as HTMLButtonElement).addEventListener(
+      "click",
+      () => startGame(1),
+    );
+    (document.getElementById("lobby-btn") as HTMLButtonElement).addEventListener(
+      "click",
+      endGame,
+    );
+  }
+}
+
+/** Host: check if all human players have voted and act accordingly. */
+function checkAllVoted(humanCount: number): void {
+  if (gameOverVotes.size < humanCount) return;
+
+  const replayCount = [...gameOverVotes.values()].filter(v => v === "replay").length;
+  const anyLeave = replayCount < humanCount;
+  const resolved: "replay" | "leave" = anyLeave ? "leave" : "replay";
+
+  peer?.broadcast({ type: "game_over_resolved", action: resolved, replayCount, totalCount: humanCount });
+  applyGameOverResolution(resolved, replayCount, humanCount);
+}
+
+function applyGameOverResolution(action: "replay" | "leave", replayCount: number, totalCount: number): void {
+  const voteStatusEl = document.getElementById("vote-status") as HTMLElement | null;
+  const announcement = `${replayCount}/${totalCount} wanted to play again — ${action === "replay" ? "starting new game!" : "returning to lobby…"}`;
+
+  if (voteStatusEl) voteStatusEl.textContent = announcement;
+
+  // Brief delay so players can read the announcement before transitioning
+  setTimeout(() => {
+    if (action === "replay") {
+      startGame(isOnline ? (gameState?.players.length ?? 1) : 1);
+    } else {
+      endGame();
+    }
+  }, 2000);
 }
 
 // ─── Net Status Display ───────────────────────────────────────────────────────
@@ -957,6 +1060,15 @@ async function initHostRoom(): Promise<void> {
         broadcastLobbyState();
         return;
       }
+      if (msg.type === "game_over_vote" && gameState?.gameOver) {
+        // Host receives a guest's vote
+        gameOverVotes.set(msg.playerIndex, msg.action);
+        const helpers = (window as unknown as Record<string, unknown>).__voteHelpers as
+          { updateVoteStatus: () => void; checkAllVoted: (n: number) => void; humanCount: number } | undefined;
+        helpers?.updateVoteStatus();
+        helpers?.checkAllVoted(helpers.humanCount);
+        return;
+      }
       if (msg.type === "input") remoteInputQueue.push(msg);
       if (msg.type === "state_sync" && gameState) {
         applyStateSnapshot(gameState, msg.payload);
@@ -1076,6 +1188,15 @@ async function joinAsGuest(): Promise<void> {
         connectedPlayers.clear();
         buildSlotsGrid();
         initHostRoom();
+        return;
+      }
+      if (msg.type === "game_over_resolved") {
+        applyGameOverResolution(msg.action, msg.replayCount, msg.totalCount);
+        return;
+      }
+      if (msg.type === "vote_status") {
+        const el = document.getElementById("vote-status") as HTMLElement | null;
+        if (el) el.textContent = msg.statusText;
         return;
       }
       if (msg.type === "lobby_state") {
@@ -1245,3 +1366,12 @@ buildCharPicker();
 buildSlotsGrid();
 refreshStartBtn();
 initHostRoom();
+
+// Paint powerup legend icons (once, synchronous)
+document.querySelectorAll<HTMLCanvasElement>(".pu-icon[data-kind]").forEach((el) => {
+  const kind = el.dataset.kind as PowerUpKind;
+  const oc = getPowerUpCanvas(kind);
+  el.width  = oc.width;
+  el.height = oc.height;
+  el.getContext("2d")!.drawImage(oc, 0, 0);
+});

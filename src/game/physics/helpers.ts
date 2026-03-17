@@ -47,6 +47,14 @@ export function hasBalloon(
 ): boolean {
   return state.balloons.some((b) => {
     if (b.row !== row || b.col !== col) return false;
+
+    // Trap-player balloons (a player is inside) are always passable to OTHER
+    // players so they can walk into the cell to rescue or pop the balloon.
+    const isPlayerTrap = state.players.some(
+      p => p.trappedInBalloon && p.trapBalloonId === b.id,
+    );
+    if (isPlayerTrap) return false;
+
     // Balloon is passable while the player's AABB overlaps the balloon's cell.
     // Cell pixel bounds (exclusive):
     const cellLeft   = b.col * CELL_W;
@@ -82,8 +90,14 @@ export function isWalkable(
   if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return false;
   if (state.grid[row][col] !== 0) return false;
   if (player) return !hasBalloon(state, row, col, player);
-  // No player context — treat any balloon as blocking (e.g. generic path checks)
-  return !state.balloons.some((b) => b.row === row && b.col === col);
+  // No player context — treat any balloon as blocking, EXCEPT trap-player balloons
+  // (those should be walkable so AI pathfinding can route through them for rescue/kill)
+  return !state.balloons.some(
+    (b) =>
+      b.row === row &&
+      b.col === col &&
+      !state.players.some(p => p.trappedInBalloon && p.trapBalloonId === b.id),
+  );
 }
 
 export function directionDelta(dir: Direction): [number, number] {

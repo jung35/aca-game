@@ -1,5 +1,4 @@
 import type { GameState, Player } from "../types";
-import { isWalkable } from "../physics/helpers";
 
 /** True if the cell at (row, col) is not threatened by any active balloon blast. */
 export function isSafe(state: GameState, row: number, col: number): boolean {
@@ -27,14 +26,20 @@ export function isSafe(state: GameState, row: number, col: number): boolean {
 /**
  * BFS check: can the player reach a safe cell after a hypothetical bomb is
  * placed at (bombRow, bombCol)?
+ *
+ * Returns the first safe cell [row, col] reachable from the player's
+ * current position, or null if trapped.
  */
-export function canEscapeAfterBomb(
+export function findEscapeAfterBomb(
   state: GameState,
   player: Player,
   bombRow: number,
   bombCol: number,
-): boolean {
+): [number, number] | null {
   const threatened = new Set<string>();
+
+  // Track which block cells would be destroyed by ALL active bombs + the new one
+  const destroyedBlocks = new Set<string>();
 
   const addBombThreats = (br: number, bc: number, range: number): void => {
     threatened.add(`${br},${bc}`);
@@ -50,7 +55,10 @@ export function canEscapeAfterBomb(
         const nc = bc + dc * r;
         if (state.grid[nr]?.[nc] === 1) break;
         threatened.add(`${nr},${nc}`);
-        if (state.grid[nr]?.[nc] === 2) break;
+        if (state.grid[nr]?.[nc] === 2) {
+          destroyedBlocks.add(`${nr},${nc}`);
+          break;
+        }
       }
     }
   };
@@ -70,19 +78,35 @@ export function canEscapeAfterBomb(
 
   while (queue.length > 0) {
     const [cr, cc] = queue.shift()!;
-    if (!threatened.has(`${cr},${cc}`)) return true;
+    if (!threatened.has(`${cr},${cc}`)) return [cr, cc];
 
     for (const [dr, dc] of deltas) {
       const nr = cr + dr;
       const nc = cc + dc;
       const nk = `${nr},${nc}`;
       if (visited.has(nk)) continue;
-      if (!isWalkable(state, nr, nc, player)) continue;
+      if (nr < 0 || nc < 0 || nr >= state.grid.length || nc >= (state.grid[0]?.length ?? 0)) continue;
+      if (state.grid[nr][nc] === 1) continue;
+      // Only walk through a destructible block if it will actually be
+      // destroyed by the combined explosions (i.e. it's in a blast arm).
+      if (state.grid[nr][nc] === 2 && !destroyedBlocks.has(nk)) continue;
+      // Can't walk through an existing balloon
+      if (state.balloons.some(b => b.row === nr && b.col === nc)) continue;
       visited.add(nk);
       queue.push([nr, nc]);
     }
   }
-  return false;
+  return null;
+}
+
+/** Convenience wrapper — returns true/false like the old API. */
+export function canEscapeAfterBomb(
+  state: GameState,
+  player: Player,
+  bombRow: number,
+  bombCol: number,
+): boolean {
+  return findEscapeAfterBomb(state, player, bombRow, bombCol) !== null;
 }
 
 /** Returns true if placing a balloon right now has a valid target and an escape route. */
